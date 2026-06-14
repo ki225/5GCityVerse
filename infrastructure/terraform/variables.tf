@@ -55,7 +55,7 @@ variable "eks_node_max_size" {
 variable "free5gc_webui_url" {
   description = "Public free5GC WebUI endpoint used by the demo backend to create subscriber records"
   type        = string
-  default     = "http://ab1be331f34b846dfa58d61963046526-1596480068.ap-northeast-1.elb.amazonaws.com:5000"
+  default     = "http://adf69506a54e24c9ab3bbc31c1d42a2d-983101909.ap-northeast-1.elb.amazonaws.com:5000"
 }
 
 variable "free5gc_webui_username" {
@@ -75,4 +75,10 @@ variable "free5gc_plmn_id" {
   description = "PLMN ID used for generated free5GC subscriber records"
   type        = string
   default     = "20893"
+}
+
+variable "prometheus_url" {
+  description = "Optional Prometheus HTTP endpoint for real UPF/SMF/AMF metrics. Leave empty to use estimated dashboard values."
+  type        = string
+  default     = ""
 }

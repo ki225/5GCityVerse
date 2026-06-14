@@ -1,0 +1,295 @@
+{
+  "Comment": "5GCityVerse — Multi-step Network Slice Reconfiguration Workflow",
+  "StartAt": "ValidateEvent",
+  "States": {
+    "ValidateEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EventEngineLambdaArn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.validation",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "ChooseSliceStrategy"
+    },
+
+    "ChooseSliceStrategy": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.event_type",
+          "StringEquals": "concert",
+          "Next": "ActivateEMBBSlice"
+        },
+        {
+          "Variable": "$.event_type",
+          "StringEquals": "typhoon",
+          "Next": "ActivateMTCAndURLLC"
+        },
+        {
+          "Variable": "$.event_type",
+          "StringEquals": "accident",
+          "Next": "ActivateV2XSlice"
+        },
+        {
+          "Variable": "$.event_type",
+          "StringEquals": "medical",
+          "Next": "ActivateURLLCSlice"
+        },
+        {
+          "Variable": "$.event_type",
+          "StringEquals": "iot_surge",
+          "Next": "ActivateMTCSlice"
+        }
+      ],
+      "Default": "HandleError"
+    },
+
+    "ActivateEMBBSlice": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "CreateEMBBPFD",
+          "States": {
+            "CreateEMBBPFD": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NefPfdCreateLambdaArn}",
+                "Payload": {
+                  "parameters": [
+                    {"name": "app_id",            "value": "embb-concert"},
+                    {"name": "slice_sst",          "value": "1"},
+                    {"name": "flow_descriptions",  "value": ["permit in udp from any to any", "permit out udp from any to any"]}
+                  ]
+                }
+              },
+              "ResultPath": "$.pfd_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "TrafficInfluenceEMBB",
+          "States": {
+            "TrafficInfluenceEMBB": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NefTrafficInfluenceLambdaArn}",
+                "Payload": {
+                  "parameters": [
+                    {"name": "slice_sst",     "value": "1"},
+                    {"name": "af_service_id", "value": "concert-svc"}
+                  ]
+                }
+              },
+              "ResultPath": "$.ti_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.slice_actions",
+      "Next": "WaitForTrafficRise"
+    },
+
+    "ActivateMTCAndURLLC": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "CreateMTCPFD",
+          "States": {
+            "CreateMTCPFD": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NefPfdCreateLambdaArn}",
+                "Payload": {
+                  "parameters": [
+                    {"name": "app_id",   "value": "typhoon-iot"},
+                    {"name": "slice_sst","value": "3"}
+                  ]
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "ActivateURLLCQoS",
+          "States": {
+            "ActivateURLLCQoS": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NefQosSubscriptionLambdaArn}",
+                "Payload": {
+                  "parameters": [
+                    {"name": "event_type","value": "typhoon"}
+                  ]
+                }
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.slice_actions",
+      "Next": "ScaleAMF"
+    },
+
+    "ActivateV2XSlice": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NefTrafficInfluenceLambdaArn}",
+        "Payload": {
+          "parameters": [
+            {"name": "slice_sst",     "value": "4"},
+            {"name": "af_service_id", "value": "v2x-routing"}
+          ]
+        }
+      },
+      "ResultPath": "$.slice_actions",
+      "Next": "UpdateDynamoDB"
+    },
+
+    "ActivateURLLCSlice": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NefQosSubscriptionLambdaArn}",
+        "Payload": {
+          "parameters": [
+            {"name": "event_type","value": "medical"}
+          ]
+        }
+      },
+      "ResultPath": "$.slice_actions",
+      "Next": "UpdateDynamoDB"
+    },
+
+    "ActivateMTCSlice": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NefPfdCreateLambdaArn}",
+        "Payload": {
+          "parameters": [
+            {"name": "app_id",   "value": "iot-surge"},
+            {"name": "slice_sst","value": "3"}
+          ]
+        }
+      },
+      "ResultPath": "$.slice_actions",
+      "Next": "ScaleAMF"
+    },
+
+    "WaitForTrafficRise": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "CheckUPFLoad"
+    },
+
+    "CheckUPFLoad": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NwdafAnalyticsLambdaArn}",
+        "Payload": {}
+      },
+      "ResultPath": "$.analytics",
+      "Next": "ShouldScaleUPF"
+    },
+
+    "ShouldScaleUPF": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.analytics.Payload.upf_cpu_percent",
+          "NumericGreaterThan": 50,
+          "Next": "ScaleUPF"
+        }
+      ],
+      "Default": "UpdateDynamoDB"
+    },
+
+    "ScaleUPF": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${HpaUpdateLambdaArn}",
+        "Payload": {
+          "parameters": [
+            {"name": "component",        "value": "UPF"},
+            {"name": "target_replicas",  "value": "4"}
+          ]
+        }
+      },
+      "ResultPath": "$.hpa_result",
+      "Next": "UpdateDynamoDB"
+    },
+
+    "ScaleAMF": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${HpaUpdateLambdaArn}",
+        "Payload": {
+          "parameters": [
+            {"name": "component",       "value": "AMF"},
+            {"name": "target_replicas", "value": "3"}
+          ]
+        }
+      },
+      "ResultPath": "$.hpa_result",
+      "Next": "UpdateDynamoDB"
+    },
+
+    "UpdateDynamoDB": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${DynamoDBTable}",
+        "Key": {
+          "pk": {"S.$": "States.Format('EVENT#{}', $.execution_id)"},
+          "sk": {"S": "STATUS"}
+        },
+        "UpdateExpression": "SET #st = :s",
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": {":s": {"S": "SLICE_RECONFIGURED"}}
+      },
+      "ResultPath": null,
+      "Next": "Done"
+    },
+
+    "HandleError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${DynamoDBTable}",
+        "Key": {
+          "pk": {"S.$": "States.Format('EVENT#{}', $.execution_id)"},
+          "sk": {"S": "STATUS"}
+        },
+        "UpdateExpression": "SET #st = :s",
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": {":s": {"S": "FAILED"}}
+      },
+      "ResultPath": null,
+      "Next": "Done"
+    },
+
+    "Done": {
+      "Type": "Succeed"
+    }
+  }
+}

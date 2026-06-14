@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ueransim-iot
+  namespace: free5gc
+  labels:
+    app: ueransim-iot
+    app.kubernetes.io/component: ue
+    app.kubernetes.io/part-of: 5gcityverse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ueransim-iot
+  template:
+    metadata:
+      labels:
+        app: ueransim-iot
+        app.kubernetes.io/component: ue
+        app.kubernetes.io/part-of: 5gcityverse
+    spec:
+      containers:
+        - name: ueransim-ue
+          image: free5gc/ueransim:v4.0.1
+          imagePullPolicy: IfNotPresent
+          command: ["./nr-ue"]
+          args: ["-c", "/etc/ueransim/ue-config.yaml", "-n", "50"]
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          volumeMounts:
+            - name: ue-config
+              mountPath: /etc/ueransim
+      volumes:
+        - name: ue-config
+          configMap:
+            name: ueransim-ue-config-mmtc
+            items:
+              - key: ue-config.yaml
+                path: ue-config.yaml

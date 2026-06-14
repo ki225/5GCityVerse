@@ -107,6 +107,14 @@ cd /mnt/d/projects/5GCityVerse
 chmod +x scripts/*.sh
 ```
 
+If Terraform was first initialized from Windows and later used from WSL, refresh the provider lock file for Linux once:
+
+```bash
+cd /mnt/d/projects/5GCityVerse/infrastructure/terraform
+terraform providers lock -platform=linux_amd64
+terraform init
+```
+
 Full AWS deployment, including Terraform, EKS/free5GC/UERANSIM, frontend build, S3 sync, and CloudFront invalidation:
 
 ```bash

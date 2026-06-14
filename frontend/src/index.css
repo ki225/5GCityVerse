@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-city-bg text-slate-100 font-mono;
+  }
+  ::-webkit-scrollbar {
+    @apply w-1.5;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-city-panel;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-600 rounded-full;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-city-panel border border-city-border rounded-lg p-4;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold;
+  }
+  .btn {
+    @apply px-4 py-2 rounded-lg font-semibold text-sm transition-all duration-200 
+           border border-transparent disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-sky-600 hover:bg-sky-500 active:scale-95;
+  }
+  .btn-danger {
+    @apply btn bg-red-700 hover:bg-red-600 active:scale-95;
+  }
+}
+
+/* SVG packet animation */
+.packet-flow {
+  stroke-dasharray: 8 6;
+  animation: packet-march 0.8s linear infinite;
+}
+@keyframes packet-march {
+  to { stroke-dashoffset: -28; }
+}
+
+/* Node pulse when pod is scaling */
+.node-scaling {
+  animation: node-glow 1s ease-in-out infinite alternate;
+}
+@keyframes node-glow {
+  from { filter: drop-shadow(0 0 4px currentColor); }
+  to   { filter: drop-shadow(0 0 12px currentColor); }
+}

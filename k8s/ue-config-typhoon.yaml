@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ueransim-ue-config-typhoon
+  namespace: free5gc
+data:
+  ue-config.yaml: |
+    supi: "imsi-208930000000010"
+    mcc: "208"
+    mnc: "93"
+    key: "8baf473f2f8fd09487cccbd7097c6862"
+    op: "8e27b6af0e692e750f32667a3b14605d"
+    opType: "OPC"
+    amf: "8000"
+    imei: "356938035643810"
+    imeiSv: "4370816125816160"
+    uacAic:
+      mps: false
+      mcs: false
+    uacAcc:
+      normalClass: 0
+      class11: false
+      class12: false
+      class13: false
+      class14: false
+      class15: false
+    sessions:
+      - type: "IPv4"
+        apn: "emergency"
+        slice:
+          sst: 0x02
+          sd: 0x000003
+    configured-nssai:
+      - sst: 0x02
+        sd: 0x000003
+    default-nssai:
+      - sst: 2
+        sd: 000003
+    integrity:
+      IA1: true
+      IA2: true
+      IA3: true
+    ciphering:
+      EA1: true
+      EA2: true
+      EA3: true
+    integrityMaxRate:
+      uplink: "full"
+      downlink: "full"

@@ -1,0 +1,243 @@
+global:
+  userPlaneArchitecture: single
+  uesubnet: 10.100.0.0/16
+free5gc-upf:
+  global:
+    userPlaneArchitecture: single
+    uesubnet: 10.100.0.0/16
+  upf:
+    podSecurityContext:
+      sysctls: []
+    securityContext:
+      privileged: true
+      allowPrivilegeEscalation: true
+      capabilities:
+        add:
+          - NET_ADMIN
+          - NET_RAW
+          - SYS_MODULE
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1024Mi
+    configuration:
+      dnnList:
+        - dnn: internet
+          cidr: 10.100.1.0/24
+        - dnn: emergency
+          cidr: 10.100.3.0/24
+        - dnn: iot
+          cidr: 10.100.4.0/24
+      logger:
+        enable: true
+        level: trace
+        reportCaller: false
+free5gc-amf:
+  amf:
+    configuration:
+      configuration: |-
+        info:
+          version: 1.0.9
+          description: AMF configuration for 5GCityVerse slices
+        configuration:
+          serviceNameList:
+            - namf-comm
+            - namf-evts
+            - namf-mt
+            - namf-loc
+            - namf-oam
+          ngapIpList:
+            - 0.0.0.0
+          ngapPort: 38412
+          sbi:
+            scheme: http
+            registerIPv4: free5gc-free5gc-amf-service
+            bindingIPv4: 0.0.0.0
+            port: 8080
+            tls:
+              key: ./cert/amf.key
+              pem: ./cert/amf.pem
+          nrfUri: http://nrf-nnrf:8000
+          nrfCertPem: cert/nrf.pem
+          amfName: AMF
+          servedGuamiList:
+            - plmnId:
+                mcc: 208
+                mnc: 93
+              amfId: cafe00
+          supportTaiList:
+            - plmnId:
+                mcc: 208
+                mnc: 93
+              tac: 000001
+          plmnSupportList:
+            - plmnId:
+                mcc: 208
+                mnc: 93
+              snssaiList:
+                - sst: 1
+                  sd: 000001
+                - sst: 2
+                  sd: 000002
+                - sst: 2
+                  sd: 000003
+                - sst: 3
+                  sd: 000004
+                - sst: 4
+                  sd: 000005
+          supportDnnList:
+            - internet
+            - emergency
+            - iot
+          security:
+            integrityOrder:
+              - NIA2
+            cipheringOrder:
+              - NEA0
+          networkName:
+            full: free5GC
+            short: free
+          locality: area1
+          sctp:
+            numOstreams: 3
+            maxInstreams: 5
+            maxAttempts: 2
+            maxInitTimeout: 2
+          defaultUECtxReq: false
+        logger:
+          enable: true
+          level: info
+          reportCaller: false
+free5gc-smf:
+  global:
+    userPlaneArchitecture: single
+  smf:
+    configuration:
+      configuration: |-
+        smfName: SMF
+        snssaiInfos:
+          - sNssai:
+              sst: 1
+              sd: 000001
+            dnnInfos:
+              - dnn: internet
+                dns:
+                  ipv4: 8.8.8.8
+                  ipv6: 2001:4860:4860::8888
+          - sNssai:
+              sst: 2
+              sd: 000002
+            dnnInfos:
+              - dnn: internet
+                dns:
+                  ipv4: 8.8.8.8
+                  ipv6: 2001:4860:4860::8888
+          - sNssai:
+              sst: 2
+              sd: 000003
+            dnnInfos:
+              - dnn: emergency
+                dns:
+                  ipv4: 8.8.8.8
+                  ipv6: 2001:4860:4860::8888
+          - sNssai:
+              sst: 3
+              sd: 000004
+            dnnInfos:
+              - dnn: iot
+                dns:
+                  ipv4: 8.8.8.8
+                  ipv6: 2001:4860:4860::8888
+          - sNssai:
+              sst: 4
+              sd: 000005
+            dnnInfos:
+              - dnn: internet
+                dns:
+                  ipv4: 8.8.8.8
+                  ipv6: 2001:4860:4860::8888
+        plmnList:
+          - mcc: 208
+            mnc: 93
+        userplaneInformation:
+          upNodes:
+            gNB1:
+              type: AN
+            UPF:
+              type: UPF
+              nodeID: UPF_SERVICE_NAME
+              sNssaiUpfInfos:
+                - sNssai:
+                    sst: 1
+                    sd: 000001
+                  dnnUpfInfoList:
+                    - dnn: internet
+                      pools:
+                        - cidr: 10.100.1.0/24
+                - sNssai:
+                    sst: 2
+                    sd: 000002
+                  dnnUpfInfoList:
+                    - dnn: internet
+                      pools:
+                        - cidr: 10.100.2.0/24
+                - sNssai:
+                    sst: 2
+                    sd: 000003
+                  dnnUpfInfoList:
+                    - dnn: emergency
+                      pools:
+                        - cidr: 10.100.3.0/24
+                - sNssai:
+                    sst: 3
+                    sd: 000004
+                  dnnUpfInfoList:
+                    - dnn: iot
+                      pools:
+                        - cidr: 10.100.4.0/24
+                - sNssai:
+                    sst: 4
+                    sd: 000005
+                  dnnUpfInfoList:
+                    - dnn: internet
+                      pools:
+                        - cidr: 10.100.5.0/24
+              interfaces:
+                - interfaceType: N3
+                  endpoints:
+                    - UPF_SERVICE_NAME
+                  networkInstances:
+                    - internet
+                    - emergency
+                    - iot
+          links:
+            - A: gNB1
+              B: UPF
+        locality: area1
+        t3591:
+          enable: true
+          expireTime: 16s
+          maxRetryTimes: 3
+        t3592:
+          enable: true
+          expireTime: 16s
+          maxRetryTimes: 3
+      ueRoutingInfo: |-
+        UE1:
+          members:
+            - imsi-208930000000001
+          topology:
+            - A: gNB1
+              B: UPF
+free5gc-webui:
+  webui:
+    service:
+      type: LoadBalancer
+      port: 5000
+mongodb:
+  extraDeploy: []
+  persistence:
+    enabled: false

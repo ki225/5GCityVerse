@@ -1,0 +1,86 @@
+global:
+  free5gcReleaseName: free5gc
+  gnb:
+    multus:
+      enabled: false
+
+projectName: ueransim
+
+gnb:
+  enabled: true
+  name: gnb
+  replicaCount: 1
+  image:
+    name: free5gc/ueransim
+    tag: v4.0.1
+    pullPolicy: IfNotPresent
+  amf:
+    n2if:
+      serviceName: free5gc-amf-amf-n2
+      port: 38412
+  configuration: |-
+    mcc: '208'
+    mnc: '93'
+    nci: '0x000000010'
+    idLength: 32
+    tac: 1
+    slices:
+      - sst: 0x1
+        sd: 0x010203
+    ignoreStreamIds: true
+
+ue:
+  enabled: true
+  name: ue
+  replicaCount: 1
+  image:
+    name: free5gc/ueransim
+    tag: v4.0.1
+    pullPolicy: IfNotPresent
+  command: "./nr-ue -c ./config/ue-config.yaml"
+  securityContext:
+    capabilities:
+      add: ["NET_ADMIN"]
+  configuration: |-
+    supi: "imsi-208930000000001"
+    mcc: "208"
+    mnc: "93"
+    key: "8baf473f2f8fd09487cccbd7097c6862"
+    op: "8e27b6af0e692e750f32667a3b14605d"
+    opType: "OPC"
+    amf: "8000"
+    imei: "356938035643803"
+    imeiSv: "4370816125816151"
+    uacAic:
+      mps: false
+      mcs: false
+    uacAcc:
+      normalClass: 0
+      class11: false
+      class12: false
+      class13: false
+      class14: false
+      class15: false
+    sessions:
+      - type: "IPv4"
+        apn: "internet"
+        slice:
+          sst: 0x01
+          sd: 0x010203
+    configured-nssai:
+      - sst: 0x01
+        sd: 0x010203
+    default-nssai:
+      - sst: 1
+        sd: 010203
+    integrity:
+      IA1: true
+      IA2: true
+      IA3: true
+    ciphering:
+      EA1: true
+      EA2: true
+      EA3: true
+    integrityMaxRate:
+      uplink: "full"
+      downlink: "full"

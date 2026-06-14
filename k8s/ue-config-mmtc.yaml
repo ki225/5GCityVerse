@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ueransim-ue-config-mmtc
+  namespace: free5gc
+data:
+  ue-config.yaml: |
+    supi: "imsi-208930000000100"
+    mcc: "208"
+    mnc: "93"
+    key: "8baf473f2f8fd09487cccbd7097c6862"
+    op: "8e27b6af0e692e750f32667a3b14605d"
+    opType: "OPC"
+    amf: "8000"
+    imei: "356938035643900"
+    imeiSv: "4370816125816200"
+    uacAic:
+      mps: false
+      mcs: false
+    uacAcc:
+      normalClass: 0
+      class11: false
+      class12: false
+      class13: false
+      class14: false
+      class15: false
+    sessions:
+      - type: "IPv4"
+        apn: "iot"
+        slice:
+          sst: 0x03
+          sd: 0x000004
+    configured-nssai:
+      - sst: 0x03
+        sd: 0x000004
+    default-nssai:
+      - sst: 3
+        sd: 000004
+    integrity:
+      IA1: true
+      IA2: true
+      IA3: true
+    ciphering:
+      EA1: true
+      EA2: true
+      EA3: true
+    integrityMaxRate:
+      uplink: "full"
+      downlink: "full"

@@ -1,0 +1,141 @@
+openapi: "3.0.0"
+info:
+  title: "5GCityVerse Network Tools"
+  version: "1.0.0"
+  description: >
+    Action Group schema for the 5GCityVerse Bedrock Supervisor Agent.
+    All tools interact with free5GC NFs via Lambda functions in the VPC.
+
+paths:
+  /get_network_analytics:
+    get:
+      operationId: get_network_analytics
+      summary: "Get current network analytics from Prometheus / NWDAF"
+      description: >
+        Returns current slice loads, UPF CPU utilization, PDU session count,
+        GTP packet rate, latency, and throughput. Call this first before
+        deciding on any network action.
+      responses:
+        "200":
+          description: "Network analytics snapshot"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upf_cpu_percent:    { type: number }
+                  upf_pod_count:      { type: integer }
+                  amf_pod_count:      { type: integer }
+                  pdu_session_count:  { type: integer }
+                  gtp_packets_per_sec:{ type: integer }
+                  latency_ms:         { type: number }
+                  throughput_mbps:    { type: number }
+                  slice_loads:        { type: array, items: { type: object } }
+                  scale_recommendation: { type: string }
+
+  /create_pfd_rule:
+    post:
+      operationId: create_pfd_rule
+      summary: "Create a Packet Flow Description rule via NEF (3GPP TS 29.522)"
+      description: >
+        Calls free5GC NEF PFD Management API to define traffic identification
+        rules. Allows SMF/UPF to recognize and prioritize specific app flows.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id, slice_sst]
+              properties:
+                app_id:
+                  type: string
+                  description: "Unique application identifier"
+                flow_descriptions:
+                  type: array
+                  items: { type: string }
+                  description: "3GPP PCC flow filter strings, e.g. 'permit in udp from any to any'"
+                slice_sst:
+                  type: integer
+                  description: "Target slice SST: 1=eMBB, 2=URLLC, 3=mMTC, 4=V2X"
+      responses:
+        "200":
+          description: "PFD creation result"
+
+  /request_traffic_influence:
+    post:
+      operationId: request_traffic_influence
+      summary: "Request traffic steering to a specific UPF/edge node via NEF"
+      description: >
+        Calls free5GC NEF Traffic Influence API to guide UE traffic toward
+        a specific Data Network Access Identifier (DNAI / edge UPF).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slice_sst]
+              properties:
+                slice_sst:
+                  type: integer
+                  description: "Slice SST: 1=eMBB, 2=URLLC, 3=mMTC, 4=V2X"
+                af_service_id:
+                  type: string
+                  description: "AF service identifier"
+                ue_ipv4:
+                  type: string
+                  description: "Target UE IPv4 (optional, if targeting specific UE)"
+      responses:
+        "200":
+          description: "Traffic influence subscription result"
+
+  /activate_qos_subscription:
+    post:
+      operationId: activate_qos_subscription
+      summary: "Request QoS prioritization for a slice/session via NEF"
+      description: >
+        Calls free5GC NEF AS-Session-with-QoS API to request elevated QoS
+        (e.g., URLLC 5QI=82 for medical, or eMBB high throughput for concert).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type]
+              properties:
+                event_type:
+                  type: string
+                  enum: [concert, typhoon, accident, medical, iot_surge]
+                ue_ipv4:
+                  type: string
+      responses:
+        "200":
+          description: "QoS subscription result"
+
+  /scale_upf_pods:
+    post:
+      operationId: scale_upf_pods
+      summary: "Adjust UPF or AMF replica count via K8s HPA"
+      description: >
+        Patches the HorizontalPodAutoscaler for UPF or AMF to set
+        target max replicas. Use when CPU metrics indicate scale-out needed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [component, target_replicas]
+              properties:
+                component:
+                  type: string
+                  enum: [UPF, AMF, SMF]
+                target_replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 4
+      responses:
+        "200":
+          description: "HPA patch result"

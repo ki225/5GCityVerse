@@ -1,0 +1,17 @@
+**/__pycache__
+frontend/node_modules/
+frontend/dist/
+frontend/vite-dev*.log
+backend-local*.log
+.terraform-provider-mirror/
+.terraformrc
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/tfplan*
+infrastructure/terraform/build/
+./terraformrc
+.vscode/
+DESIGN.md
+docs/
+**/.terraform.lock.hcl

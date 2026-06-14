@@ -76,6 +76,11 @@ data "aws_iam_policy_document" "lambda_policy" {
     actions   = ["execute-api:ManageConnections"]
     resources = ["arn:aws:execute-api:${var.aws_region}:${data.aws_caller_identity.current.account_id}:${aws_apigatewayv2_api.websocket.id}/${local.ws_stage_name}/POST/@connections/*"]
   }
+
+  statement {
+    actions   = ["eks:DescribeCluster"]
+    resources = [aws_eks_cluster.free5gc.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "lambda" {
@@ -97,17 +102,23 @@ resource "aws_lambda_function" "backend" {
   handler          = "index.lambda_handler"
   runtime          = "python3.12"
   source_code_hash = data.archive_file.backend.output_base64sha256
-  timeout          = 30
+  timeout          = 60
 
   environment {
     variables = {
-      DYNAMODB_TABLE         = aws_dynamodb_table.state.name
-      APIGW_WS_ENDPOINT      = "https://${aws_apigatewayv2_api.websocket.id}.execute-api.${var.aws_region}.amazonaws.com/${local.ws_stage_name}"
-      FREE5GC_WEBUI_URL      = var.free5gc_webui_url
-      FREE5GC_WEBUI_USERNAME = var.free5gc_webui_username
-      FREE5GC_WEBUI_PASSWORD = var.free5gc_webui_password
-      FREE5GC_PLMN_ID        = var.free5gc_plmn_id
-      FREE5GC_IMSI_PREFIX    = "20893000000"
+      DYNAMODB_TABLE                  = aws_dynamodb_table.state.name
+      APIGW_WS_ENDPOINT               = "https://${aws_apigatewayv2_api.websocket.id}.execute-api.${var.aws_region}.amazonaws.com/${local.ws_stage_name}"
+      FREE5GC_WEBUI_URL               = var.free5gc_webui_url
+      FREE5GC_WEBUI_USERNAME          = var.free5gc_webui_username
+      FREE5GC_WEBUI_PASSWORD          = var.free5gc_webui_password
+      FREE5GC_PLMN_ID                 = var.free5gc_plmn_id
+      FREE5GC_IMSI_PREFIX             = "20893000000"
+      FREE5GC_SCENARIO_UE_ID          = "imsi-208930000000001"
+      FREE5GC_NAMESPACE               = "free5gc"
+      UERANSIM_UE_DEPLOYMENT          = "ueransim-city-ue"
+      RUNTIME_SUBSCRIBER_UPSERT_LIMIT = "10"
+      EKS_CLUSTER_NAME                = aws_eks_cluster.free5gc.name
+      PROMETHEUS_URL                  = var.prometheus_url
     }
   }
 

@@ -170,6 +170,24 @@ resource "aws_eks_node_group" "free5gc" {
   ]
 }
 
+resource "aws_eks_access_entry" "lambda" {
+  cluster_name  = aws_eks_cluster.free5gc.name
+  principal_arn = aws_iam_role.lambda.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "lambda_admin" {
+  cluster_name  = aws_eks_cluster.free5gc.name
+  principal_arn = aws_iam_role.lambda.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.lambda]
+}
+
 output "eks_cluster_name" {
   value = aws_eks_cluster.free5gc.name
 }
