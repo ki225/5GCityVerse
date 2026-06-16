@@ -5,9 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
-require_cmd aws terraform kubectl helm git python3
+require_cmd aws terraform kubectl helm git python3 npm
 
 EKS_CLUSTER_NAME="$(tf_output eks_cluster_name)"
+log "Building frontend dist"
+(
+  cd "$ROOT_DIR/frontend"
+  if [[ ! -d node_modules ]]; then
+    npm ci
+  fi
+  npm run build
+)
 update_kubeconfig
 sync_free5gc_chart
 install_gtp5g

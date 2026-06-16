@@ -24,13 +24,13 @@ case "$SCENARIO" in
     ;;
   typhoon)
     echo "[1/3] Starting Typhoon UERANSIM deployment (3 UE)"
-    kubectl apply -f "$ROOT_DIR/k8s/ue-config-typhoon.yaml"
+    kubectl apply -f "$ROOT_DIR/k8s/ue-config/typhoon.yaml"
     kubectl apply -f "$ROOT_DIR/k8s/ueransim/deployments/ueransim-typhoon.yaml"
     kubectl rollout status deployment/ueransim-typhoon -n "$NAMESPACE" --timeout=180s
     ;;
   iot_surge)
     echo "[1/3] Starting IoT UERANSIM deployment (50 UE)"
-    kubectl apply -f "$ROOT_DIR/k8s/ue-config-mmtc.yaml"
+    kubectl apply -f "$ROOT_DIR/k8s/ue-config/mmtc.yaml"
     kubectl apply -f "$ROOT_DIR/k8s/ueransim/deployments/ueransim-iot.yaml"
     kubectl rollout status deployment/ueransim-iot -n "$NAMESPACE" --timeout=180s
     ;;

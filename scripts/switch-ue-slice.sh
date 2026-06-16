@@ -13,27 +13,27 @@ fi
 
 case "$SCENARIO" in
   concert)
-    CONFIG_FILE="$ROOT_DIR/k8s/ue-config-embb.yaml"
+    CONFIG_FILE="$ROOT_DIR/k8s/ue-config/embb.yaml"
     CONFIG_MAP="ueransim-ue-config-embb"
     SLICE_LABEL="eMBB SST=1 SD=000001"
     ;;
   medical|er_surge)
-    CONFIG_FILE="$ROOT_DIR/k8s/ue-config-urllc.yaml"
+    CONFIG_FILE="$ROOT_DIR/k8s/ue-config/urllc.yaml"
     CONFIG_MAP="ueransim-ue-config-urllc"
     SLICE_LABEL="URLLC SST=2 SD=000002"
     ;;
   typhoon)
-    CONFIG_FILE="$ROOT_DIR/k8s/ue-config-typhoon.yaml"
+    CONFIG_FILE="$ROOT_DIR/k8s/ue-config/typhoon.yaml"
     CONFIG_MAP="ueransim-ue-config-typhoon"
     SLICE_LABEL="URLLC SST=2 SD=000003"
     ;;
   iot_surge|iot)
-    CONFIG_FILE="$ROOT_DIR/k8s/ue-config-mmtc.yaml"
+    CONFIG_FILE="$ROOT_DIR/k8s/ue-config/mmtc.yaml"
     CONFIG_MAP="ueransim-ue-config-mmtc"
     SLICE_LABEL="mMTC SST=3 SD=000004"
     ;;
   accident)
-    CONFIG_FILE="$ROOT_DIR/k8s/ue-config-v2x.yaml"
+    CONFIG_FILE="$ROOT_DIR/k8s/ue-config/v2x.yaml"
     CONFIG_MAP="ueransim-ue-config-v2x"
     SLICE_LABEL="V2X SST=4 SD=000005"
     ;;
