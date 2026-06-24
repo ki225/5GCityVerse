@@ -187,11 +187,3 @@ resource "aws_eks_access_policy_association" "lambda_admin" {
 
   depends_on = [aws_eks_access_entry.lambda]
 }
-
-output "eks_cluster_name" {
-  value = aws_eks_cluster.free5gc.name
-}
-
-output "eks_cluster_endpoint" {
-  value = aws_eks_cluster.free5gc.endpoint
-}

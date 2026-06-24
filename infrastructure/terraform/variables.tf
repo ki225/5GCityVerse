@@ -55,7 +55,7 @@ variable "eks_node_max_size" {
 variable "free5gc_webui_url" {
   description = "Public free5GC WebUI endpoint used by the demo backend to create subscriber records"
   type        = string
-  default     = "http://adf69506a54e24c9ab3bbc31c1d42a2d-983101909.ap-northeast-1.elb.amazonaws.com:5000"
+  default     = ""
 }
 
 variable "free5gc_webui_username" {
@@ -81,4 +81,16 @@ variable "prometheus_url" {
   description = "Optional Prometheus HTTP endpoint for real UPF/SMF/AMF metrics. Leave empty to use estimated dashboard values."
   type        = string
   default     = ""
+}
+
+variable "nef_base_url" {
+  description = "free5GC NEF base URL used by NEF tool Lambdas. free5GC v4.2.2 exposes NEF PFD/OAM on this in-cluster service; QoS and Traffic Influence are compensated through real subscriber/profile and scenario traffic when unsupported."
+  type        = string
+  default     = "http://free5gc-free5gc-nef-service.free5gc.svc.cluster.local:8080"
+}
+
+variable "nef_af_id" {
+  description = "Application Function ID used when creating NEF subscriptions"
+  type        = string
+  default     = "cityverse-af"
 }
