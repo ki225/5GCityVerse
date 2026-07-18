@@ -3,22 +3,28 @@
 Seed free5GC subscribers for every 5GCityVerse scenario.
 
 Environment:
-  FREE5GC_WEBUI_URL       default http://localhost:5000
+  FREE5GC_WEBUI_URL       required; set from Terraform/deployed free5GC WebUI
   FREE5GC_WEBUI_USERNAME  default admin
-  FREE5GC_WEBUI_PASSWORD  default free5gc
+  FREE5GC_WEBUI_PASSWORD  required; supply out-of-band
   FREE5GC_PLMN_ID         default 20893
 """
 
 import json
 import os
+import socket
+import time
 import urllib.error
 import urllib.request
 
 
-FREE5GC_WEBUI_URL = os.environ.get("FREE5GC_WEBUI_URL", "http://localhost:5000").rstrip("/")
+FREE5GC_WEBUI_URL = os.environ.get("FREE5GC_WEBUI_URL", "").rstrip("/")
 USERNAME = os.environ.get("FREE5GC_WEBUI_USERNAME", "admin")
-PASSWORD = os.environ.get("FREE5GC_WEBUI_PASSWORD", "free5gc")
+PASSWORD = os.environ.get("FREE5GC_WEBUI_PASSWORD")
+if not PASSWORD:
+    raise SystemExit("FREE5GC_WEBUI_PASSWORD is required; no repository default is permitted")
 PLMN_ID = os.environ.get("FREE5GC_PLMN_ID", "20893")
+HTTP_TIMEOUT_SECONDS = int(os.environ.get("FREE5GC_HTTP_TIMEOUT_SECONDS", "20"))
+HTTP_RETRIES = int(os.environ.get("FREE5GC_HTTP_RETRIES", "5"))
 
 AUTH_KEY = "8baf473f2f8fd09487cccbd7097c6862"
 AUTH_OPC = "8e27b6af0e692e750f32667a3b14605d"
@@ -26,10 +32,10 @@ AUTH_OPC = "8e27b6af0e692e750f32667a3b14605d"
 
 SCENARIOS = {
     "concert": {
-        "ue_ids": ["imsi-208930000000001"],
+        "ue_ids": ["imsi-208930000000004"],
         "sst": 1,
         "sd": "000001",
-        "dnn": "internet",
+        "dnn": "citizen",
         "five_qi": 9,
         "ue_ambr": ("1 Gbps", "1 Gbps"),
         "session_ambr": ("1 Gbps", "1 Gbps"),
@@ -37,11 +43,24 @@ SCENARIOS = {
         "preempt_cap": "NOT_PREEMPT",
         "preempt_vuln": "NOT_PREEMPTABLE",
     },
+    "baseline_embb": {
+        "ue_ids": ["imsi-208930000000001"],
+        "sst": 1,
+        "sd": "000001",
+        "dnn": "citizen",
+        "five_qi": 9,
+        "ue_ambr": ("1 Gbps", "1 Gbps"),
+        "session_ambr": ("1 Gbps", "1 Gbps"),
+        "priority": 8,
+        "preempt_cap": "NOT_PREEMPT",
+        "preempt_vuln": "NOT_PREEMPTABLE",
+        "sequence_number": "000000000000",
+    },
     "medical": {
         "ue_ids": ["imsi-208930000000002"],
         "sst": 2,
         "sd": "000002",
-        "dnn": "internet",
+        "dnn": "emergency",
         "five_qi": 1,
         "ue_ambr": ("50 Mbps", "50 Mbps"),
         "session_ambr": ("50 Mbps", "50 Mbps"),
@@ -77,11 +96,24 @@ SCENARIOS = {
         "preempt_cap": "NOT_PREEMPT",
         "preempt_vuln": "PREEMPTABLE",
     },
+    "baseline_mmtc": {
+        "ue_ids": ["imsi-208930000000200"],
+        "sst": 3,
+        "sd": "000004",
+        "dnn": "iot",
+        "five_qi": 79,
+        "ue_ambr": ("1 Mbps", "1 Mbps"),
+        "session_ambr": ("1 Mbps", "1 Mbps"),
+        "priority": 15,
+        "preempt_cap": "NOT_PREEMPT",
+        "preempt_vuln": "PREEMPTABLE",
+        "sequence_number": "000000000000",
+    },
     "accident": {
         "ue_ids": ["imsi-208930000000003"],
         "sst": 4,
         "sd": "000005",
-        "dnn": "internet",
+        "dnn": "v2x",
         "five_qi": 75,
         "ue_ambr": ("200 Mbps", "200 Mbps"),
         "session_ambr": ("200 Mbps", "200 Mbps"),
@@ -92,14 +124,14 @@ SCENARIOS = {
 }
 
 
-def http_json(method, url, body=None, headers=None):
+def http_json_once(method, url, body=None, headers=None):
     req_headers = {"Content-Type": "application/json"}
     if headers:
         req_headers.update(headers)
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=10) as res:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as res:
             raw = res.read().decode("utf-8")
             return res.status, json.loads(raw or "{}")
     except urllib.error.HTTPError as exc:
@@ -109,6 +141,28 @@ def http_json(method, url, body=None, headers=None):
         except json.JSONDecodeError:
             parsed = {"raw": raw}
         return exc.code, parsed
+
+
+def http_json(method, url, body=None, headers=None):
+    for attempt in range(1, HTTP_RETRIES + 1):
+        try:
+            status, data = http_json_once(method, url, body, headers)
+        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+            if attempt == HTTP_RETRIES:
+                raise
+            delay = min(2 ** attempt, 10)
+            print(f"  retrying {method} after network error ({attempt}/{HTTP_RETRIES}): {exc}")
+            time.sleep(delay)
+            continue
+
+        if status not in (429, 500, 502, 503, 504) or attempt == HTTP_RETRIES:
+            return status, data
+
+        delay = min(2 ** attempt, 10)
+        print(f"  retrying {method} after HTTP {status} ({attempt}/{HTTP_RETRIES})")
+        time.sleep(delay)
+
+    raise RuntimeError("unreachable retry state")
 
 
 def login():
@@ -161,7 +215,7 @@ def subscriber_profile(imsi, scenario, cfg):
         "AuthenticationSubscription": {
             "authenticationMethod": "5G_AKA",
             "permanentKey": {"permanentKeyValue": AUTH_KEY},
-            "sequenceNumber": "000000000023",
+            "sequenceNumber": cfg.get("sequence_number", "000000000023"),
             "authenticationManagementField": "8000",
             "milenage": {"op": {"opValue": AUTH_OPC}},
             "opc": {"opcValue": AUTH_OPC},
@@ -211,6 +265,8 @@ def create_subscriber(token, imsi, profile):
 
 
 def main():
+    if not FREE5GC_WEBUI_URL:
+        raise RuntimeError("FREE5GC_WEBUI_URL is required. Run scripts/deploy.sh so Terraform/EKS resolves the cloud WebUI endpoint.")
     print(f"Logging in to free5GC WebUI: {FREE5GC_WEBUI_URL}")
     token = login()
     created = 0
