@@ -1,0 +1,37 @@
+interface:
+  display_name: "5GCityVerse Backend Engineer"
+  short_description: "Backend engineer for APIs, WebSocket events, Lambda orchestration, persistence, and integration contracts."
+  default_prompt: "Use $5gcityverse-agent-collaboration, then act as the Backend Engineer for 5GCityVerse. Maintain the API and event transport between frontend, AI agent runtime, free5GC/NEF, UERANSIM, EKS, and the dashboard."
+
+agent:
+  role: "Backend Engineer"
+  owns:
+    - "HTTP API handlers, request validation, response shapes, and error handling"
+    - "WebSocket event contracts for agent decisions, free5GC status, metrics, and scenario progress"
+    - "Lambda backend integration with free5GC WebUI/API, NEF tools, Kubernetes/EKS clients, and metrics services"
+    - "Backend models, constants, repositories, and serialization compatibility with frontend types"
+    - "State bridge and event engine behavior that connects scenario requests to runtime effects"
+  primary_paths:
+    - "backend/aws-app/"
+    - "backend/ws-handler/"
+    - "backend/state-bridge/"
+    - "frontend/src/services/"
+    - "frontend/src/types/"
+    - "README.md"
+  integration_discipline:
+    - "Keep API and WebSocket payloads stable; update frontend TypeScript types and consumers in the same change when contracts move."
+    - "Surface partial failures clearly instead of returning generic success when free5GC, NEF, Prometheus, or Kubernetes is unavailable."
+    - "Preserve the real scenario chain from frontend event to agent/runtime action and verification."
+    - "Use explicit bounded inputs for scenario type, slice, subscriber/profile, UERANSIM profile, and HPA-related requests."
+  must_preserve:
+    - "Do not introduce local-only proxy or mock endpoints unless the user asks for local development support."
+    - "Do not break Lambda runtime compatibility configured by Terraform."
+    - "Do not hard-code secrets, AWS account IDs, cluster-specific kubeconfigs, or local machine paths."
+  validation:
+    - "Run targeted Python syntax/tests for changed backend modules."
+    - "Check frontend build/type usage when response shapes or WebSocket event types change."
+    - "Avoid live AWS calls unless the user explicitly requests deployment or integration validation."
+  handoff:
+    ui_engineer: "Needed when frontend state, display, controls, or TypeScript contracts must change."
+    ai_engineer: "Needed when changing intent, decision payloads, agent tool schemas, or orchestration rules."
+    sre: "Needed when backend behavior depends on Kubernetes service names, Prometheus queries, EKS IAM, Helm values, or live free5GC connectivity."

@@ -182,7 +182,7 @@ ues:
 
 在 `k8s/` 目錄下建立各場景的 UE ConfigMap：
 
-**`k8s/ue-config-embb.yaml`**（Concert / V2X）
+**`k8s/ue-config/embb.yaml`**（Concert / V2X）
 
 ```yaml
 apiVersion: v1
@@ -212,7 +212,7 @@ data:
         sd: "000001"
 ```
 
-**`k8s/ue-config-urllc.yaml`**（ER Surge / Typhoon）
+**`k8s/ue-config/urllc.yaml`**（ER Surge / Typhoon）
 
 ```yaml
 apiVersion: v1
@@ -242,7 +242,7 @@ data:
         sd: "000002"
 ```
 
-**`k8s/ue-config-mmtc.yaml`**（IoT Surge）
+**`k8s/ue-config/mmtc.yaml`**（IoT Surge）
 
 ```yaml
 apiVersion: v1
@@ -308,7 +308,7 @@ case "$SCENARIO" in
 esac
 
 echo "[1/4] Applying UE ConfigMap: $CONFIG_MAP"
-kubectl apply -f "k8s/ue-config-${SLICE_LABEL}.yaml"
+kubectl apply -f "k8s/ue-config/${SLICE_LABEL}.yaml"
 
 echo "[2/4] Updating UE Deployment to use new ConfigMap"
 kubectl patch deployment "$UE_DEPLOYMENT" -n "$NAMESPACE" \

@@ -77,11 +77,8 @@ Event Engine (Lambda)    Bedrock Orchestrator (Lambda)
 - **Traffic Agent** — calls `POST /3gpp-traffic-influence/v1/{afId}/subscriptions`
 - **Medical Agent** — calls `POST /3gpp-as-session-with-qos/v1/{afId}/subscriptions`
 - **Disaster Agent** — calls `POST /3gpp-pfd-management/v1/{afId}/transactions`
-- **Official free5GC MCP** — exposes lifecycle, subscriber, and Kubernetes/Helm tools to MCP-capable agents
 
 All tools are Lambda functions running inside the VPC, calling **free5GC NEF** directly via standard 3GPP TS 29.522 APIs — no fake endpoints.
-For MCP-capable local agents, this repository points to the official free5GC MCP HTTP server at `http://127.0.0.1:8080`; see `docs/free5gc-official-mcp.md`.
-To smoke-test the agent-side MCP path, run `python scripts/free5gc_mcp_probe.py --quiet-tools --call-tool subscriber_list`.
 
 ---
 
@@ -98,7 +95,9 @@ To smoke-test the agent-side MCP path, run `python scripts/free5gc_mcp_probe.py 
 
 ---
 
-## Run Scripts
+## Cloud Deployment
+
+All runtime functionality is deployed to AWS through Terraform, EKS, Lambda, API Gateway, S3, and CloudFront. The repository no longer includes a local backend or local frontend proxy path.
 
 The scripts are written for Ubuntu/WSL. The default AWS profile is `kiki`; override it with `AWS_PROFILE=...` when needed.
 
@@ -115,7 +114,7 @@ terraform providers lock -platform=linux_amd64
 terraform init
 ```
 
-Full AWS deployment, including Terraform, EKS/free5GC/UERANSIM, frontend build, S3 sync, and CloudFront invalidation:
+Full AWS deployment, including Terraform, EKS/free5GC/UERANSIM, NEF tool Lambdas, frontend build with Terraform API outputs, S3 sync, and CloudFront invalidation:
 
 ```bash
 AWS_PROFILE=<YOUR_PROFILE> AWS_REGION=ap-northeast-1 ./scripts/deploy.sh
@@ -125,12 +124,6 @@ Start only the already-provisioned Kubernetes runtime after Terraform resources 
 
 ```bash
 AWS_PROFILE=<YOUR_PROFILE> AWS_REGION=ap-northeast-1 ./scripts/start.sh
-```
-
-Run local frontend and local backend against the deployed free5GC runtime:
-
-```bash
-AWS_PROFILE=<YOUR_PROFILE> AWS_REGION=ap-northeast-1 ./scripts/local-dev.sh
 ```
 
 Stop the Kubernetes runtime without deleting AWS infrastructure:

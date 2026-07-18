@@ -1,0 +1,4 @@
+interface:
+  display_name: "5GCityVerse Agent Collaboration"
+  short_description: "Project rules for 5GCityVerse agents"
+  default_prompt: "Use $5gcityverse-agent-collaboration before changing 5GCityVerse code or infrastructure."

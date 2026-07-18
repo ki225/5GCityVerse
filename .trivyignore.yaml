@@ -1,0 +1,57 @@
+misconfigurations:
+  - id: AWS-0104
+    paths: ["infrastructure/terraform/lambda-network.tf", "terraform/lambda-network.tf", "lambda-network.tf"]
+    statement: "Port 443 is the only NAT egress for regional AWS APIs (Bedrock, Lambda, Secrets Manager, API Gateway); interface endpoints are a separately reviewed cost/availability change."
+    expired_at: 2027-07-16
+  - id: KSV-0010
+    paths: ["k8s/gtp5g-installer.yaml", "gtp5g-installer.yaml"]
+    statement: "The pinned installer needs host PID only to nsenter PID 1 and load the reviewed gtp5g kernel module."
+    expired_at: 2027-07-16
+  - id: KSV-0014
+    paths: ["k8s/gtp5g-installer.yaml", "gtp5g-installer.yaml"]
+    statement: "The short-lived installer must install nsenter before entering the host mount namespace; application pods remain read-only."
+    expired_at: 2027-07-16
+  - id: KSV-0017
+    paths: ["k8s/gtp5g-installer.yaml", "gtp5g-installer.yaml"]
+    statement: "Loading a kernel module is the sole privileged operation; the DaemonSet is digest/commit pinned and user-plane-node constrained."
+    expired_at: 2027-07-16
+  - id: KSV-0121
+    paths: ["k8s/gtp5g-installer.yaml", "gtp5g-installer.yaml"]
+    statement: "The installer needs the host root mount solely as the nsenter target for the pinned kernel-module installation."
+    expired_at: 2027-07-16
+  - id: KSV-0009
+    paths: ["k8s/multus-daemonset.yaml", "multus-daemonset.yaml"]
+    statement: "The digest-pinned Multus node CNI must serve the host CNI socket and network namespace."
+    expired_at: 2027-07-16
+  - id: KSV-0010
+    paths: ["k8s/multus-daemonset.yaml", "multus-daemonset.yaml"]
+    statement: "The digest-pinned Multus thick daemon requires host PID visibility so delegated CNI plugins can enter the target pod network namespace."
+    expired_at: 2027-07-16
+  - id: KSV-0017
+    paths: ["k8s/multus-daemonset.yaml", "multus-daemonset.yaml"]
+    statement: "Only the digest-pinned node CNI daemon and binary installer are privileged; ordinary workloads are not excepted."
+    expired_at: 2027-07-16
+  - id: KSV-0118
+    paths: ["k8s/multus-daemonset.yaml", "multus-daemonset.yaml"]
+    statement: "The node CNI must run as root to install binaries and manage host CNI paths; both containers use read-only root filesystems."
+    expired_at: 2027-07-16
+  - id: KSV-0121
+    paths: ["k8s/multus-daemonset.yaml", "multus-daemonset.yaml"]
+    statement: "The Multus thick plugin requires the host root and narrowly enumerated CNI/kubelet paths; no application pod receives them."
+    expired_at: 2027-07-16
+  - id: KSV-0053
+    paths: ["k8s/pfcp-evidence-collector.yaml", "pfcp-evidence-collector.yaml"]
+    statement: "The dedicated collector requires create on pods/exec to read gtp5g PDR/FAR/QER state; it accepts no external selector input."
+    expired_at: 2027-07-16
+  - id: KSV-0005
+    paths: ["k8s/pfcp-evidence-collector.yaml", "pfcp-evidence-collector.yaml"]
+    statement: "The node-constrained collector uses SYS_ADMIN only for setns(2) into the selected UPF network namespace; it accepts no request input and drops all unlisted capabilities."
+    expired_at: 2027-07-16
+  - id: KSV-0010
+    paths: ["k8s/pfcp-evidence-collector.yaml", "pfcp-evidence-collector.yaml"]
+    statement: "Host PID visibility is required to map the digest-pinned UPF container cgroup to its network namespace for read-only PDR/FAR/QER evidence collection."
+    expired_at: 2027-07-16
+  - id: KSV-0010
+    paths: ["k8s/gtp5g-metrics-exporter.yaml", "gtp5g-metrics-exporter.yaml"]
+    statement: "The tokenless, read-only exporter needs host PID visibility to read each UPF process namespace's /proc/net/dev packet counters; it cannot enter or mutate the namespace."
+    expired_at: 2027-07-16
