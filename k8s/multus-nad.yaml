@@ -1,0 +1,154 @@
+# Manual NetworkAttachmentDefinitions for future free5GC Multus mode.
+#
+# WARNING: these NADs require every target node to have a stable host interface
+# named eth1. The current EKS managed-node deployment does not provision that
+# interface, so k8s/free5gc-eks-values.yaml keeps chart-level Multus disabled.
+# Do not apply these NADs for the default destroy/deploy path.
+#
+# NetworkAttachmentDefinitions for free5GC 5G Core reference point interfaces.
+# Defined per 3GPP TS 23.501 (5G System Architecture).
+#
+# These NADs are created automatically by the free5gc Helm chart when
+# global.amf.multus.enabled=true / global.upf.multus.enabled=true.
+# This file serves as a manual fallback and documents the subnet layout.
+#
+# CNI type: ipvlan (NOT macvlan) — required for AWS VPC where the ENI MAC
+# address is registered with the VPC router. macvlan would create new MACs
+# that the VPC does not recognise, dropping all traffic. ipvlan shares the
+# host ENI MAC while assigning distinct IPs, which is VPC-compatible.
+#
+# All secondary interfaces share master: eth1 (the Multus ENI).
+# ipvlan sub-interfaces on the same master each get a unique IP from their
+# respective subnet via host-local IPAM.
+#
+# Interface layout per pod:
+#   eth0  — VPC CNI primary (pod default network)
+#   net1  — N2 / N3 secondary (ipvlan on eth1, varies by NF)
+#   net2  — N4 secondary (ipvlan on eth1, UPF only)
+#   net3  — N6 secondary (ipvlan on eth1, UPF only)
+#
+# Subnet map (matches Terraform multus_n* locals in eks.tf):
+#   N2  10.60.12.0/24  — NGAP/SCTP  AMF  ↔ gNB       (3GPP N2)
+#   N3  10.60.10.0/24  — GTP-U/UDP  gNB  ↔ UPF       (3GPP N3)
+#   N4  10.60.11.0/24  — PFCP/UDP   SMF  ↔ UPF       (3GPP N4)
+#   N6  10.60.13.0/24  — IP         UPF  ↔ Data Net  (3GPP N6)
+#
+# Namespace: free5gc (same namespace as free5gc Helm chart)
+---
+# N2 — NGAP interface for AMF (connects AMF to gNB)
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n2network
+  namespace: free5gc
+spec:
+  config: |-
+    {
+      "cniVersion": "0.3.1",
+      "name": "n2network",
+      "plugins": [
+        {
+          "type": "ipvlan",
+          "master": "eth1",
+          "mode": "l2",
+          "ipam": {
+            "type": "host-local",
+            "subnet": "10.60.12.0/24",
+            "rangeStart": "10.60.12.100",
+            "rangeEnd": "10.60.12.200",
+            "gateway": "10.60.12.1"
+          }
+        }
+      ]
+    }
+---
+# N3 — GTP-U interface for UPF (receives user-plane traffic from gNB)
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n3network
+  namespace: free5gc
+spec:
+  config: |-
+    {
+      "cniVersion": "0.3.1",
+      "name": "n3network",
+      "plugins": [
+        {
+          "type": "ipvlan",
+          "master": "eth1",
+          "mode": "l2",
+          "ipam": {
+            "type": "host-local",
+            "subnet": "10.60.10.0/24",
+            "rangeStart": "10.60.10.100",
+            "rangeEnd": "10.60.10.200",
+            "gateway": "10.60.10.1"
+          }
+        },
+        {
+          "type": "tuning",
+          "sysctl": {
+            "net.core.rmem_max": "134217728",
+            "net.core.wmem_max": "134217728",
+            "net.ipv4.udp_mem": "16777216 25165824 33554432"
+          }
+        }
+      ]
+    }
+---
+# N4 — PFCP interface for UPF (receives session rules from SMF)
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n4network
+  namespace: free5gc
+spec:
+  config: |-
+    {
+      "cniVersion": "0.3.1",
+      "name": "n4network",
+      "plugins": [
+        {
+          "type": "ipvlan",
+          "master": "eth1",
+          "mode": "l2",
+          "ipam": {
+            "type": "host-local",
+            "subnet": "10.60.11.0/24",
+            "rangeStart": "10.60.11.100",
+            "rangeEnd": "10.60.11.200",
+            "gateway": "10.60.11.1"
+          }
+        }
+      ]
+    }
+---
+# N6 — Data Network interface for UPF (routes UE traffic to internet / DN)
+# This interface is CRITICAL: without N6, UE packets cannot leave the 5GC.
+# The UPF performs NAT here and routes to the external network.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n6network
+  namespace: free5gc
+spec:
+  config: |-
+    {
+      "cniVersion": "0.3.1",
+      "name": "n6network",
+      "plugins": [
+        {
+          "type": "ipvlan",
+          "master": "eth1",
+          "mode": "l2",
+          "ipam": {
+            "type": "host-local",
+            "subnet": "10.60.13.0/24",
+            "rangeStart": "10.60.13.100",
+            "rangeEnd": "10.60.13.200",
+            "gateway": "10.60.13.1"
+          }
+        }
+      ]
+    }

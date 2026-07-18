@@ -1,0 +1,120 @@
+global:
+  projectName: free5gc
+  userPlaneArchitecture: single
+  uesubnet: 10.101.0.0/16
+  smf:
+    multus:
+      enabled: false
+smf: &multiSliceSmf
+  configuration:
+    # Reserve URRs are not charging rules and are not needed for QER policing.
+    # The chart default (1000 bytes) is smaller than one typical GTP-U packet;
+    # gtp5g v0.10.2 then emits a PFCP report for every subsequent packet.
+    # Disable these reserve URRs and collect PDR/QER/TEID counters separately.
+    urrConfiguration: |-
+      urrPeriod: 0
+      urrThreshold: 0
+      requestedUnit: 1000
+    configuration: |-
+      smfName: SMF
+      snssaiInfos:
+        - sNssai: {sst: 1, sd: 000001}
+          dnnInfos:
+            - dnn: citizen
+              dns: {ipv4: 8.8.8.8, ipv6: 2001:4860:4860::8888}
+        - sNssai: {sst: 2, sd: 000002}
+          dnnInfos:
+            - dnn: emergency
+              dns: {ipv4: 8.8.8.8, ipv6: 2001:4860:4860::8888}
+        - sNssai: {sst: 2, sd: 000003}
+          dnnInfos:
+            - dnn: emergency
+              dns: {ipv4: 8.8.8.8, ipv6: 2001:4860:4860::8888}
+        - sNssai: {sst: 3, sd: 000004}
+          dnnInfos:
+            - dnn: iot
+              dns: {ipv4: 8.8.8.8, ipv6: 2001:4860:4860::8888}
+        - sNssai: {sst: 4, sd: 000005}
+          dnnInfos:
+            - dnn: v2x
+              dns: {ipv4: 8.8.8.8, ipv6: 2001:4860:4860::8888}
+      plmnList:
+        - {mcc: 208, mnc: 93}
+      userplaneInformation:
+        upNodes:
+          gNB1:
+            type: AN
+          UPF-eMBB:
+            type: UPF
+            nodeID: upf-embb-free5gc-upf-upf-embb-service
+            sNssaiUpfInfos:
+              - sNssai: {sst: 1, sd: 000001}
+                dnnUpfInfoList:
+                  - dnn: citizen
+                    pools: [{cidr: 10.101.0.0/24}]
+            interfaces:
+              - interfaceType: N3
+                endpoints: [upf-embb-free5gc-upf-upf-embb-service]
+                networkInstances: [citizen]
+          UPF-URLLC:
+            type: UPF
+            nodeID: upf-urllc-free5gc-upf-upf-urllc-service
+            sNssaiUpfInfos:
+              - sNssai: {sst: 2, sd: 000002}
+                dnnUpfInfoList:
+                  - dnn: emergency
+                    pools: [{cidr: 10.102.0.0/25}]
+              - sNssai: {sst: 2, sd: 000003}
+                dnnUpfInfoList:
+                  - dnn: emergency
+                    pools: [{cidr: 10.102.0.128/25}]
+            interfaces:
+              - interfaceType: N3
+                endpoints: [upf-urllc-free5gc-upf-upf-urllc-service]
+                networkInstances: [emergency]
+          UPF-mMTC:
+            type: UPF
+            nodeID: upf-mmtc-free5gc-upf-upf-mmtc-service
+            sNssaiUpfInfos:
+              - sNssai: {sst: 3, sd: 000004}
+                dnnUpfInfoList:
+                  - dnn: iot
+                    pools: [{cidr: 10.103.0.0/24}]
+            interfaces:
+              - interfaceType: N3
+                endpoints: [upf-mmtc-free5gc-upf-upf-mmtc-service]
+                networkInstances: [iot]
+          UPF-V2X:
+            type: UPF
+            nodeID: upf-v2x-free5gc-upf-upf-v2x-service
+            sNssaiUpfInfos:
+              - sNssai: {sst: 4, sd: 000005}
+                dnnUpfInfoList:
+                  - dnn: v2x
+                    pools: [{cidr: 10.104.0.0/24}]
+            interfaces:
+              - interfaceType: N3
+                endpoints: [upf-v2x-free5gc-upf-upf-v2x-service]
+                networkInstances: [v2x]
+        links:
+          - {A: gNB1, B: UPF-eMBB}
+          - {A: gNB1, B: UPF-URLLC}
+          - {A: gNB1, B: UPF-mMTC}
+          - {A: gNB1, B: UPF-V2X}
+      locality: area1
+      t3591: {enable: true, expireTime: 16s, maxRetryTimes: 3}
+      t3592: {enable: true, expireTime: 16s, maxRetryTimes: 3}
+    ueRoutingInfo: |-
+      UE1:
+        members: [imsi-208930000000001]
+        topology: [{A: gNB1, B: UPF-eMBB}]
+    logger:
+      enable: true
+      level: trace
+      reportCaller: false
+
+# The same file is lintable against the SMF subchart directly and consumable
+# by the parent free5GC chart.  Parent dependency values must be nested under
+# the dependency name; the alias prevents two configurations from drifting.
+free5gc-smf:
+  smf: *multiSliceSmf

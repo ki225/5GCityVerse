@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gtp5g-metrics-exporter
+  namespace: free5gc
+  labels:
+    app.kubernetes.io/name: gtp5g-metrics-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gtp5g-metrics-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gtp5g-metrics-exporter
+    spec:
+      automountServiceAccountToken: false
+      hostPID: true
+      nodeSelector:
+        plane: user-plane
+      tolerations:
+        - key: plane
+          operator: Equal
+          value: user-plane
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: alpine/k8s@sha256:d1c43926b7169eccee5b7f3ed3439890b569d3ec5cee8092426918a1d4f991b4
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              interval=5
+              while true; do
+                observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                for proc in /proc/[0-9]*; do
+                  pid=${proc##*/}
+                  [ "$(cat "$proc/comm" 2>/dev/null || true)" = upf ] || continue
+                  host=$(tr '\0' '\n' <"$proc/environ" 2>/dev/null | sed -n 's/^HOSTNAME=//p')
+                  [ -n "$host" ] || continue
+                  line=$(grep '^[[:space:]]*upfgtp:' "$proc/net/dev" 2>/dev/null || true)
+                  [ -n "$line" ] || continue
+                  set -- $(printf '%s\n' "$line" | sed 's/^[[:space:]]*upfgtp:[[:space:]]*//')
+                  rx_packets=$2
+                  rx_errors=$3
+                  rx_drops=$4
+                  tx_packets=${10}
+                  tx_errors=${11}
+                  tx_drops=${12}
+                  state="/tmp/${host}.counters"
+                  if [ -s "$state" ]; then
+                    read -r old_rx_packets old_tx_packets old_rx_errors old_tx_errors old_rx_drops old_tx_drops <"$state"
+                    delta_rx=$((rx_packets - old_rx_packets))
+                    delta_tx=$((tx_packets - old_tx_packets))
+                    delta_rx_errors=$((rx_errors - old_rx_errors))
+                    delta_tx_errors=$((tx_errors - old_tx_errors))
+                    delta_rx_drops=$((rx_drops - old_rx_drops))
+                    delta_tx_drops=$((tx_drops - old_tx_drops))
+                    if [ "$delta_rx" -ge 0 ] && [ "$delta_tx" -ge 0 ]; then
+                      rx_pps=$(awk -v packets="$delta_rx" -v seconds="$interval" 'BEGIN { printf "%.3f", packets / seconds }')
+                      tx_pps=$(awk -v packets="$delta_tx" -v seconds="$interval" 'BEGIN { printf "%.3f", packets / seconds }')
+                      total_pps=$(awk -v rx="$delta_rx" -v tx="$delta_tx" -v seconds="$interval" 'BEGIN { printf "%.3f", (rx + tx) / seconds }')
+                      case "$host" in
+                        upf-embb-*) slice=embb ;;
+                        upf-urllc-*) slice=urllc ;;
+                        upf-mmtc-*) slice=mmtc ;;
+                        upf-v2x-*) slice=v2x ;;
+                        *) slice=unknown ;;
+                      esac
+                      printf '{"timestamp":"%s","pod":"%s","slice":"%s","rxPackets":%s,"txPackets":%s,"rxPps":%s,"txPps":%s,"gtpPacketsPerSec":%s,"rxDropsDelta":%s,"txDropsDelta":%s,"rxErrorsDelta":%s,"txErrorsDelta":%s,"source":"gtp5g-upfgtp-interface"}\n' \
+                        "$observed_at" "$host" "$slice" "$rx_packets" "$tx_packets" "$rx_pps" "$tx_pps" "$total_pps" \
+                        "$delta_rx_drops" "$delta_tx_drops" "$delta_rx_errors" "$delta_tx_errors"
+                    fi
+                  fi
+                  printf '%s %s %s %s %s %s\n' "$rx_packets" "$tx_packets" "$rx_errors" "$tx_errors" "$rx_drops" "$tx_drops" >"$state"
+                done
+                sleep "$interval"
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_PTRACE"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 50m, memory: 48Mi}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Mi

@@ -1,3 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gtp5g-installer-patches
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: gtp5g-installer
+data:
+  zero-rate-qer.patch: |
+    diff --git a/src/genl/genl_qer.c b/src/genl/genl_qer.c
+    index 68c37db..b0d377d 100644
+    --- a/src/genl/genl_qer.c
+    +++ b/src/genl/genl_qer.c
+    @@ -315,13 +315,15 @@ static int qer_fill(struct qer *qer, struct gtp5g_dev *gtp, struct genl_info *in
+                 qer->mbr.ul_high = nla_get_u32(mbr_param_attrs[GTP5G_QER_MBR_UL_HIGH32]);
+                 qer->mbr.ul_low  = nla_get_u8(mbr_param_attrs[GTP5G_QER_MBR_UL_LOW8]);
+                 qer->ul_mbr = concat_bit_rate(qer->mbr.ul_high, qer->mbr.ul_low);
+    -            qer->ul_policer = newTrafficPolicer(qer->ul_mbr);
+    +            if (qer->ul_mbr > 0)
+    +                qer->ul_policer = newTrafficPolicer(qer->ul_mbr);
+             }
+             if (mbr_param_attrs[GTP5G_QER_MBR_DL_HIGH32] &&
+                 mbr_param_attrs[GTP5G_QER_MBR_DL_LOW8]) {
+                 qer->mbr.dl_high = nla_get_u32(mbr_param_attrs[GTP5G_QER_MBR_DL_HIGH32]);
+                 qer->mbr.dl_low  = nla_get_u8(mbr_param_attrs[GTP5G_QER_MBR_DL_LOW8]);
+                 qer->dl_mbr = concat_bit_rate(qer->mbr.dl_high, qer->mbr.dl_low);
+    -            qer->dl_policer = newTrafficPolicer(qer->dl_mbr);
+    +            if (qer->dl_mbr > 0)
+    +                qer->dl_policer = newTrafficPolicer(qer->dl_mbr);
+             }
+         }
+
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -15,44 +48,134 @@ spec:
         app.kubernetes.io/name: gtp5g-installer
     spec:
       hostPID: true
-      hostNetwork: true
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # Only install gtp5g on user-plane nodes where UPF runs.
+      # Control-plane nodes do not need the GTP kernel module.
+      nodeSelector:
+        plane: user-plane
       tolerations:
-        - operator: Exists
+        - key: plane
+          operator: Equal
+          value: user-plane
+          effect: NoSchedule
       containers:
         - name: installer
-          image: public.ecr.aws/amazonlinux/amazonlinux:2023
+          image: public.ecr.aws/amazonlinux/amazonlinux@sha256:590b8c9fdab65c7f5b8a2392739104ed6bc5055433ba8ff2bf0d2fa500db2ea3
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
           volumeMounts:
             - name: host-root
               mountPath: /host
+            - name: patches
+              mountPath: /patches
+              readOnly: true
           command:
             - /bin/bash
             - -lc
             - |
               set -euo pipefail
-              dnf install -y util-linux
+              dnf install -y util-linux git golang
+              if [ ! -x /host/usr/local/bin/gtp5g-tunnel ]; then
+                rm -rf /tmp/go-gtp5gnl
+                git clone --filter=blob:none --no-checkout https://github.com/free5gc/go-gtp5gnl.git /tmp/go-gtp5gnl
+                git -C /tmp/go-gtp5gnl fetch --depth 1 origin 381b9e66b918028249e62a88c7c10722a2c35904
+                git -C /tmp/go-gtp5gnl checkout --detach 381b9e66b918028249e62a88c7c10722a2c35904
+                test "$(git -C /tmp/go-gtp5gnl rev-parse HEAD)" = "381b9e66b918028249e62a88c7c10722a2c35904"
+                mkdir -p /host/usr/local/bin
+                (
+                  cd /tmp/go-gtp5gnl/cmd/gogtp5g-tunnel
+                  CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /host/usr/local/bin/gtp5g-tunnel .
+                )
+                chmod 0755 /host/usr/local/bin/gtp5g-tunnel
+              fi
+              test -x /host/usr/local/bin/gtp5g-tunnel
+              install -D -m 0644 /patches/zero-rate-qer.patch /host/var/lib/5gcityverse/patches/gtp5g-zero-rate-qer.patch
               nsenter -t 1 -m -u -i -n -p -- bash -lc '
                 set -euo pipefail
-                if lsmod | grep -q "^gtp5g"; then
-                  echo "gtp5g already loaded"
-                  exit 0
-                fi
+                marker=/var/lib/5gcityverse/gtp5g-zero-rate-qer-v1
+                reload_required=/var/lib/5gcityverse/gtp5g-zero-rate-qer-reload-required
+                installed_now=0
+                module_was_loaded=0
+                lsmod | grep -q "^gtp5g" && module_was_loaded=1
                 PKG=dnf
                 command -v dnf >/dev/null 2>&1 || PKG=yum
-                $PKG install -y git gcc make kernel-devel-$(uname -r) elfutils-libelf-devel || $PKG install -y git gcc make kernel-devel elfutils-libelf-devel
-                rm -rf /tmp/gtp5g
-                git clone --depth 1 https://github.com/free5gc/gtp5g.git /tmp/gtp5g
-                grep -RIl "flowi4_tos" /tmp/gtp5g/src | xargs -r sed -i "s/flowi4_tos/flowi4_dscp/g"
-                make -C /tmp/gtp5g
-                make -C /tmp/gtp5g install
-                depmod -a
-                modprobe gtp5g
+                if [ ! -s "$marker" ]; then
+                  $PKG install -y git gcc make elfutils-libelf-devel
+                  if [ ! -e "/lib/modules/$(uname -r)/build/Makefile" ]; then
+                    $PKG install -y "kernel-devel-$(uname -r)"
+                  fi
+                  test -e "/lib/modules/$(uname -r)/build/Makefile"
+                  rm -rf /tmp/gtp5g
+                  git clone --filter=blob:none --no-checkout https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+                  git -C /tmp/gtp5g fetch --depth 1 origin 952fb419130f5fc44cac1874e8183312006b746c
+                  git -C /tmp/gtp5g checkout --detach 952fb419130f5fc44cac1874e8183312006b746c
+                  test "$(git -C /tmp/gtp5g rev-parse HEAD)" = "952fb419130f5fc44cac1874e8183312006b746c"
+                  git -C /tmp/gtp5g apply --check /var/lib/5gcityverse/patches/gtp5g-zero-rate-qer.patch
+                  git -C /tmp/gtp5g apply /var/lib/5gcityverse/patches/gtp5g-zero-rate-qer.patch
+                  grep -RIl "flowi4_tos" /tmp/gtp5g/src | xargs -r sed -i "s/flowi4_tos/flowi4_dscp/g"
+                  make -C /tmp/gtp5g
+                  make -C /tmp/gtp5g install
+                  depmod -a
+                  {
+                    echo "source=952fb419130f5fc44cac1874e8183312006b746c"
+                    sha256sum /var/lib/5gcityverse/patches/gtp5g-zero-rate-qer.patch
+                    find "/lib/modules/$(uname -r)" -type f -name "gtp5g.ko*" -exec sha256sum {} \;
+                  } > "$marker"
+                  installed_now=1
+                fi
+                if [ "$installed_now" -eq 1 ] && [ "$module_was_loaded" -eq 1 ]; then
+                  # The running module is still the old binary. Keep QoS disabled
+                  # until the controlled UPF outage reloads the patched module.
+                  echo 0 > /proc/gtp5g/qos
+                  touch "$reload_required"
+                  echo "patched module installed; controlled reload required"
+                else
+                  if ! lsmod | grep -q "^gtp5g"; then
+                    modprobe gtp5g
+                  fi
+                  test -w /proc/gtp5g/qos
+                  echo 1 > /proc/gtp5g/qos
+                  grep -q "QoS Enable: 1" /proc/gtp5g/qos
+                  rm -f "$reload_required"
+                fi
                 lsmod | grep "^gtp5g"
               '
               sleep infinity
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -lc
+                - >-
+                  test -x /host/usr/local/bin/gtp5g-tunnel &&
+                  nsenter -t 1 -m -u -i -n -p -- bash -lc
+                  'test -s /var/lib/5gcityverse/gtp5g-zero-rate-qer-v1 &&
+                  test ! -e /var/lib/5gcityverse/gtp5g-zero-rate-qer-reload-required &&
+                  lsmod | grep -q "^gtp5g " &&
+                  grep -q "QoS Enable: 1" /proc/gtp5g/qos'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
       volumes:
         - name: host-root
           hostPath:
             path: /
+        - name: patches
+          configMap:
+            name: gtp5g-installer-patches
+            items:
+              - key: zero-rate-qer.patch
+                path: zero-rate-qer.patch

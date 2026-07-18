@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!patches/qer-actuator.patch
+!upstream/smf-2232d2992f204207e58830ac8ee55bf0cd832f92.tar

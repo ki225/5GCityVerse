@@ -1,0 +1,132 @@
+# Repository-owned replacement for the upstream UERANSIM UE deployment
+# template. scripts/lib.sh copies this file into the cloned Helm chart before
+# rendering so the resident baseline remains reproducible across deployments.
+{{- with .Values.ue }}
+{{- if .enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ueransim.fullname" $ }}-{{ .name }}
+  labels:
+    {{- include "ueransim.labels" $ | nindent 4 }}
+    app: {{ $.Values.projectName }}
+    component: {{ .name }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ueransim.selectorLabels" $ | nindent 6 }}
+      app: {{ $.Values.projectName }}
+      component: {{ .name }}
+  replicas: {{ .replicaCount }}
+  template:
+    metadata:
+      annotations:
+        {{- include "ueransim.ueAnnotations" $ | nindent 8 }}
+        {{- if .baselineTraffic.enabled }}
+        5gcityverse.io/resident-baseline-version: "1"
+        {{- end }}
+      labels:
+        {{- include "ueransim.selectorLabels" $ | nindent 8 }}
+        app: {{ $.Values.projectName }}
+        component: {{ .name }}
+        {{- if .baselineTraffic.enabled }}
+        5gcityverse.io/traffic-source: resident-ue-tun
+        {{- end }}
+    spec:
+      imagePullSecrets:
+        {{- toYaml .imagePullSecrets | nindent 8 }}
+      securityContext:
+        {{- toYaml .podSecurityContext | nindent 8 }}
+      initContainers:
+      - name: prepare-iproute2
+        image: {{ .image.name }}:{{ .image.tag | default $.Chart.AppVersion }}
+        imagePullPolicy: {{ .image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        command: ["sh", "-c", "cp -a /etc/iproute2/. /writable-iproute2/"]
+        volumeMounts:
+        - mountPath: /writable-iproute2
+          name: ue-iproute2
+      containers:
+      - image: {{ .image.name }}:{{ .image.tag | default $.Chart.AppVersion }}
+        name: {{ .name }}
+        securityContext:
+            {{- toYaml .securityContext | nindent 12 }}
+        command: ["{{ .volume.mount }}/wrapper.sh"]
+        volumeMounts:
+        - mountPath: {{ .volume.mount }}
+          name: {{ .volume.name }}
+        - mountPath: /tmp
+          name: ue-tmp
+        - mountPath: /dev/net
+          name: ue-dev-net
+        - mountPath: /etc/iproute2
+          name: ue-iproute2
+        resources:
+            {{- toYaml .resources | nindent 12 }}
+      {{- if .baselineTraffic.enabled }}
+      - name: resident-baseline-iperf3
+        image: {{ .baselineTraffic.image }}
+        imagePullPolicy: {{ .baselineTraffic.imagePullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            add: ["NET_ADMIN"]
+        command: ["sh", "-c"]
+        volumeMounts:
+        - mountPath: /tmp
+          name: ue-tmp
+        args:
+          - |-
+            set -u
+            while [ ! -e /sys/class/net/{{ .baselineTraffic.interface }} ]; do
+              echo "RESIDENT_BASELINE state=waiting interface={{ .baselineTraffic.interface }}"
+              sleep 2
+            done
+            while true; do
+              echo "RESIDENT_BASELINE state=running scenario=resident-baseline transport=free5gc-tun interface={{ .baselineTraffic.interface }} rate={{ .baselineTraffic.rate }}"
+              iperf3 --bind-dev {{ .baselineTraffic.interface }} \
+                -c {{ .baselineTraffic.server | default (printf "iperf3-server.%s.svc.cluster.local" $.Release.Namespace) }} \
+                -u -b {{ .baselineTraffic.rate }} -t {{ .baselineTraffic.runSeconds }} \
+                -l {{ .baselineTraffic.packetLength }} -i 1 --forceflush || true
+              echo "RESIDENT_BASELINE state=reconnecting interface={{ .baselineTraffic.interface }}"
+              sleep {{ .baselineTraffic.retrySeconds }}
+            done
+        resources:
+          {{- toYaml .baselineTraffic.resources | nindent 10 }}
+      {{- end }}
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      nodeSelector:
+        {{- toYaml .nodeSelector | nindent 8 }}
+      affinity:
+        {{- toYaml .affinity | nindent 8 }}
+      tolerations:
+        {{- toYaml .tolerations | nindent 8 }}
+      volumes:
+      - name: {{ .volume.name }}
+        configMap:
+          name: {{ .configmap.name }}
+          items:
+          - key: ue-config.yaml
+            path: ue-config.yaml
+          - key: wrapper.sh
+            path: wrapper.sh
+            mode: 0755
+      - name: ue-tmp
+        emptyDir:
+          sizeLimit: 64Mi
+      - name: ue-dev-net
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
+      - name: ue-iproute2
+        emptyDir:
+          sizeLimit: 1Mi
+{{- end }}
+{{- end }}

@@ -11,8 +11,8 @@ gnb:
   name: gnb
   replicaCount: 1
   image:
-    name: free5gc/ueransim
-    tag: v4.0.1
+    name: 429555954826.dkr.ecr.ap-northeast-1.amazonaws.com/5gcityverse-prod-ueransim@sha256
+    tag: 58909d22fe2b1d24893fe26eb9502dac1056c85e4135fa87902bf3a1d1eb3e0b
     pullPolicy: IfNotPresent
   amf:
     n2if:
@@ -26,7 +26,15 @@ gnb:
     tac: 1
     slices:
       - sst: 0x1
-        sd: 0x010203
+        sd: 0x000001
+      - sst: 0x2
+        sd: 0x000002
+      - sst: 0x2
+        sd: 0x000003
+      - sst: 0x3
+        sd: 0x000004
+      - sst: 0x4
+        sd: 0x000005
     ignoreStreamIds: true
 
 ue:
@@ -34,13 +42,45 @@ ue:
   name: ue
   replicaCount: 1
   image:
-    name: free5gc/ueransim
-    tag: v4.0.1
+    name: 429555954826.dkr.ecr.ap-northeast-1.amazonaws.com/5gcityverse-prod-ueransim@sha256
+    tag: 58909d22fe2b1d24893fe26eb9502dac1056c85e4135fa87902bf3a1d1eb3e0b
     pullPolicy: IfNotPresent
   command: "./nr-ue -c ./config/ue-config.yaml"
+  podSecurityContext:
+    runAsNonRoot: false
+    runAsUser: 0
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
   securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
     capabilities:
-      add: ["NET_ADMIN"]
+      drop: ["ALL"]
+      add: ["NET_ADMIN", "MKNOD"]
+  # This sidecar shares the resident UE Pod network namespace. It waits for
+  # nr-ue to create uesimtun0, then binds every capped iperf run to that
+  # interface. Unlike the former standalone EKS Job, this traffic can be
+  # attributed to the resident free5GC bearer.
+  baselineTraffic:
+    enabled: true
+    image: networkstatic/iperf3@sha256:c1e4a239a83d1d60975bce1c9b7661af5517e362bf335f66a2c5b6adaeb4f19f
+    imagePullPolicy: IfNotPresent
+    interface: uesimtun0
+    server: iperf3-server.free5gc.svc.cluster.local
+    # Keep the resident bearer observable without saturating the UE-TUN path.
+    # Scenario workloads apply their own population-scaled rates separately.
+    rate: 1M
+    runSeconds: 180
+    retrySeconds: 2
+    packetLength: 800
+    resources:
+      requests:
+        cpu: 25m
+        memory: 16Mi
+      limits:
+        cpu: 250m
+        memory: 64Mi
   configuration: |-
     supi: "imsi-208930000000001"
     mcc: "208"
@@ -63,16 +103,16 @@ ue:
       class15: false
     sessions:
       - type: "IPv4"
-        apn: "internet"
+        apn: "citizen"
         slice:
           sst: 0x01
-          sd: 0x010203
+          sd: 0x000001
     configured-nssai:
       - sst: 0x01
-        sd: 0x010203
+        sd: 0x000001
     default-nssai:
       - sst: 1
-        sd: 010203
+        sd: 000001
     integrity:
       IA1: true
       IA2: true

@@ -1,0 +1,270 @@
+# Multus CNI DaemonSet — enables secondary network interfaces for UPF pods.
+# Uses the upstream Multus thick image pinned to Multus v4.
+# scripts/lib.sh replaces the pinned default; override MULTUS_CNI_IMAGE if
+# this deployment must use a private mirror.
+# Must be applied before free5gc Helm chart and gtp5g-installer.
+#
+# Apply order:
+#   1. kubectl apply -f k8s/multus-daemonset.yaml
+#   2. kubectl apply -f k8s/multus-nad.yaml
+#   3. kubectl apply -f k8s/gtp5g-installer.yaml
+#   4. helm upgrade --install free5gc ... -f k8s/free5gc-eks-values.yaml
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: network-attachment-definitions.k8s.cni.cncf.io
+spec:
+  group: k8s.cni.cncf.io
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                config:
+                  type: string
+  scope: Namespaced
+  names:
+    plural: network-attachment-definitions
+    singular: network-attachment-definition
+    kind: NetworkAttachmentDefinition
+    shortNames:
+      - net-attach-def
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-multus-ds
+  namespace: kube-system
+  labels:
+    tier: node
+    app: multus
+    name: multus
+spec:
+  selector:
+    matchLabels:
+      name: multus
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: multus
+        name: multus
+    spec:
+      hostNetwork: true
+      # The thick-plugin daemon delegates the primary CNI call. It must share
+      # the host PID namespace so AWS VPC CNI can dereference kubelet's
+      # /proc/<pid>/task/<tid>/ns/net path during pod sandbox creation.
+      hostPID: true
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      serviceAccountName: multus
+      containers:
+        - name: kube-multus
+          image: ghcr.io/k8snetworkplumbingwg/multus-cni@sha256:c8bfe5bad3b5371a5677feb9e8e162da91b61bcac409c244f6f1b18c801ad006
+          command:
+            - /usr/src/multus-cni/bin/multus-daemon
+          args:
+            - -config=/etc/cni/net.d/multus.d/daemon-config.json
+          env:
+            - name: MULTUS_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: 100m
+              memory: 90Mi
+            limits:
+              cpu: 200m
+              memory: 180Mi
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: hostroot
+              mountPath: /hostroot
+              mountPropagation: HostToContainer
+            - name: cni
+              mountPath: /host/etc/cni/net.d
+            - name: cnibin
+              mountPath: /opt/cni/bin
+            - name: multus-daemon-config
+              mountPath: /etc/cni/net.d/multus.d
+              readOnly: true
+            - name: host-run
+              mountPath: /host/run
+              mountPropagation: HostToContainer
+            - name: host-var-lib-cni-multus
+              mountPath: /var/lib/cni/multus
+            - name: host-var-lib-kubelet
+              mountPath: /var/lib/kubelet
+              mountPropagation: HostToContainer
+            - name: host-run-netns
+              mountPath: /run/netns
+              mountPropagation: HostToContainer
+      initContainers:
+        - name: install-multus-binary
+          image: ghcr.io/k8snetworkplumbingwg/multus-cni@sha256:c8bfe5bad3b5371a5677feb9e8e162da91b61bcac409c244f6f1b18c801ad006
+          command:
+            - /usr/src/multus-cni/bin/install_multus
+          args:
+            - -d
+            - /host/opt/cni/bin
+            - -t
+            - thick
+          resources:
+            requests:
+              cpu: 10m
+              memory: 15Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: cnibin
+              mountPath: /host/opt/cni/bin
+      volumes:
+        - name: hostroot
+          hostPath:
+            path: /
+        - name: cni
+          hostPath:
+            path: /etc/cni/net.d
+        - name: cnibin
+          hostPath:
+            path: /opt/cni/bin
+        - name: host-run
+          hostPath:
+            path: /run
+        - name: host-var-lib-cni-multus
+          hostPath:
+            path: /var/lib/cni/multus
+            type: DirectoryOrCreate
+        - name: host-var-lib-kubelet
+          hostPath:
+            path: /var/lib/kubelet
+        - name: host-run-netns
+          hostPath:
+            path: /run/netns
+            type: DirectoryOrCreate
+        - name: multus-cfg
+          configMap:
+            name: multus-cni-config
+            items:
+              - key: cni-conf.json
+                path: 70-multus.conf
+        - name: multus-daemon-config
+          configMap:
+            name: multus-daemon-config
+            items:
+              - key: daemon-config.json
+                path: daemon-config.json
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multus-cni-config
+  namespace: kube-system
+data:
+  cni-conf.json: |
+    {
+      "name": "multus-cni-network",
+      "type": "multus",
+      "capabilities": {
+        "portMappings": true
+      },
+      "delegates": [
+        {
+          "cniVersion": "0.3.1",
+          "name": "default-cni-network",
+          "plugins": [
+            {
+              "type": "aws-cni",
+              "vethPrefix": "eni"
+            }
+          ]
+        }
+      ],
+      "kubeconfig": "/etc/cni/net.d/multus.d/multus.kubeconfig"
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multus-daemon-config
+  namespace: kube-system
+data:
+  daemon-config.json: |
+    {
+      "chrootDir": "/hostroot",
+      "cniVersion": "0.3.1",
+      "logLevel": "verbose",
+      "logToStderr": true,
+      "cniConfigDir": "/host/etc/cni/net.d",
+      "multusAutoconfigDir": "/host/etc/cni/net.d",
+      "multusConfigFile": "auto",
+      "socketDir": "/host/run/multus/"
+    }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multus
+  namespace: kube-system
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: multus
+rules:
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources:
+      - network-attachment-definitions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/status
+    verbs:
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
+      - ""
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: multus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multus
+subjects:
+  - kind: ServiceAccount
+    name: multus
+    namespace: kube-system

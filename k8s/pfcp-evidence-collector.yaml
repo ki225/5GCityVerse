@@ -1,0 +1,167 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pfcp-evidence-collector
+  namespace: free5gc
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pfcp-evidence-collector
+  namespace: free5gc
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pfcp-evidence-collector
+  namespace: free5gc
+subjects:
+  - kind: ServiceAccount
+    name: pfcp-evidence-collector
+    namespace: free5gc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pfcp-evidence-collector
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pfcp-evidence-collector
+  namespace: free5gc
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 240
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: pfcp-evidence-collector
+        spec:
+          # Dedicated identity: no application workload shares this token. The
+          # collector has read-only Kubernetes RBAC and reads gtp5g state from
+          # the local user-plane node instead of execing into workload pods.
+          automountServiceAccountToken: true
+          serviceAccountName: pfcp-evidence-collector
+          restartPolicy: Never
+          hostPID: true
+          nodeSelector:
+            plane: user-plane
+          tolerations:
+            - key: plane
+              operator: Equal
+              value: user-plane
+              effect: NoSchedule
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: collector
+              # amd64 manifest resolved with `docker manifest inspect
+              # alpine/k8s:1.31.5 --verbose`; unlike the distroless official
+              # kubectl image, this collector image contains /bin/sh.
+              image: alpine/k8s@sha256:d1c43926b7169eccee5b7f3ed3439890b569d3ec5cee8092426918a1d4f991b4
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                  # SYS_ADMIN is required only for setns(2); SYS_PTRACE permits
+                  # reading the selected host process cgroup under hostPID;
+                  # NET_ADMIN permits read-only generic-netlink gtp5g queries
+                  # inside the selected UPF network namespace.
+                  add: ["NET_ADMIN", "SYS_ADMIN", "SYS_PTRACE"]
+                readOnlyRootFilesystem: true
+                runAsUser: 0
+                runAsGroup: 0
+              resources:
+                requests: {cpu: 25m, memory: 32Mi}
+                limits: {cpu: 100m, memory: 128Mi}
+              env:
+                - name: HOME
+                  value: /tmp
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: gtp5g-tunnel
+                  mountPath: /host/usr/local/bin/gtp5g-tunnel
+                  readOnly: true
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  echo "EVIDENCE_VERSION=2"
+                  NS=free5gc
+                  kubectl -n "$NS" get deployments -l app.kubernetes.io/component=iperf3 \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.5gcityverse\.io/execution-id}{"|"}{.metadata.annotations.5gcityverse\.io/sst}{"|"}{.metadata.annotations.5gcityverse\.io/sd}{"|"}{.metadata.annotations.5gcityverse\.io/dnn}{"\n"}{end}' \
+                  | while IFS='|' read -r deployment execution sst sd dnn; do
+                    [ -n "$execution" ] || continue
+                    case "$dnn" in
+                      citizen) upf_nf=upf-embb ;;
+                      emergency) upf_nf=upf-urllc ;;
+                      iot) upf_nf=upf-mmtc ;;
+                      v2x) upf_nf=upf-v2x ;;
+                      *) upf_nf=unsupported ;;
+                    esac
+                    upf_pod=$(kubectl -n "$NS" get pods -l "nf=$upf_nf" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+                    iperf_pod=$(kubectl -n "$NS" get pods -l "app=$deployment" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+                    collected=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    echo "BEGIN_ARTIFACT executionId=$execution sst=$sst sd=$sd dnn=$dnn collectedAt=$collected"
+                    echo "BEGIN_KERNEL"
+                    if [ -n "$upf_pod" ]; then
+                      container_id=$(kubectl -n "$NS" get pod "$upf_pod" -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's#.*://##')
+                      upf_pid=""
+                      for proc in /proc/[0-9]*; do
+                        [ "$(cat "$proc/comm" 2>/dev/null || true)" = upf ] || continue
+                        grep -Fq "$container_id" "$proc/cgroup" 2>/dev/null || continue
+                        upf_pid=${proc##*/}
+                        break
+                      done
+                      if [ -n "$upf_pid" ]; then
+                        for kind in pdr far qer; do
+                          echo "BEGIN_${kind}"
+                          nsenter -t "$upf_pid" -n /host/usr/local/bin/gtp5g-tunnel list "$kind"
+                          echo "END_${kind}"
+                        done
+                      else
+                        echo "UNSUPPORTED upf-host-pid-not-found"
+                      fi
+                    else
+                      echo "UNSUPPORTED dedicated-upf-not-found"
+                    fi
+                    echo "END_KERNEL"
+                    echo "BEGIN_PFCP"
+                    kubectl -n "$NS" logs -l app.kubernetes.io/name=free5gc-smf --since=3m --all-containers=true \
+                      | grep -Ei 'PFCP|Session Modification|SEID|TEID|QER|S-NSSAI|SST|SD|DNN' || true
+                    echo "END_PFCP"
+                    echo "BEGIN_IPERF"
+                    if [ -n "$iperf_pod" ]; then
+                      echo "PROVENANCE pod=$iperf_pod source=iperf3"
+                      kubectl -n "$NS" logs "$iperf_pod" --since=3m --tail=100 || true
+                    else
+                      echo "UNSUPPORTED iperf-pod-not-found"
+                    fi
+                    echo "END_IPERF"
+                    echo "END_ARTIFACT"
+                  done
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: gtp5g-tunnel
+              hostPath:
+                path: /usr/local/bin/gtp5g-tunnel
+                type: File

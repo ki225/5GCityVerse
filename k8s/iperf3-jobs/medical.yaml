@@ -7,12 +7,30 @@ metadata:
     app.kubernetes.io/component: iperf3
     app.kubernetes.io/part-of: 5gcityverse
 spec:
+  activeDeadlineSeconds: 240
+  backoffLimit: 1
   ttlSecondsAfterFinished: 300
   template:
     spec:
+      automountServiceAccountToken: false
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: iperf3-client
-          image: networkstatic/iperf3:latest
+          image: networkstatic/iperf3@sha256:c1e4a239a83d1d60975bce1c9b7661af5517e362bf335f66a2c5b6adaeb4f19f
           imagePullPolicy: IfNotPresent
-          command: ["iperf3", "-c", "iperf3-server.free5gc.svc.cluster.local", "-u", "-b", "10M", "-t", "120", "-l", "200", "--trip-times", "--json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            requests: {cpu: 25m, memory: 24Mi}
+            limits: {cpu: 500m, memory: 96Mi}
+          command: ["iperf3", "-c", "iperf3-server.free5gc.svc.cluster.local", "-u", "-b", "13M", "-t", "180", "-l", "200", "--json"]

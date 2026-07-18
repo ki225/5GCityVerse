@@ -1,0 +1,91 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: upf-embb-hpa
+  namespace: free5gc
+  labels:
+    app.kubernetes.io/component: upf
+    app.kubernetes.io/part-of: 5gcityverse
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: upf-embb-free5gc-upf-upf-embb
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: upf-urllc-hpa
+  namespace: free5gc
+  labels:
+    app.kubernetes.io/component: upf
+    app.kubernetes.io/part-of: 5gcityverse
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: upf-urllc-free5gc-upf-upf-urllc
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: upf-mmtc-hpa
+  namespace: free5gc
+  labels:
+    app.kubernetes.io/component: upf
+    app.kubernetes.io/part-of: 5gcityverse
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: upf-mmtc-free5gc-upf-upf-mmtc
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: upf-v2x-hpa
+  namespace: free5gc
+  labels:
+    app.kubernetes.io/component: upf
+    app.kubernetes.io/part-of: 5gcityverse
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: upf-v2x-free5gc-upf-upf-v2x
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

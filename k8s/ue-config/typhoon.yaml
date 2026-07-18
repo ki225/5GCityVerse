@@ -14,6 +14,8 @@ data:
     amf: "8000"
     imei: "356938035643810"
     imeiSv: "4370816125816160"
+    gnbSearchList:
+      - gnb-service.free5gc.svc.cluster.local
     uacAic:
       mps: false
       mcs: false

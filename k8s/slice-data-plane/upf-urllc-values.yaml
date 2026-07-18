@@ -1,0 +1,35 @@
+global:
+  projectName: free5gc
+  userPlaneArchitecture: single
+  uesubnet: 10.102.0.0/24
+  upf:
+    multus:
+      enabled: false
+upf:
+  name: upf-urllc
+  replicaCount: 1
+  configuration:
+    dnnList:
+      - dnn: emergency
+        cidr: 10.102.0.0/24
+    logger:
+      enable: true
+      level: trace
+      reportCaller: false
+  nodeSelector:
+    plane: user-plane
+  podSecurityContext:
+    runAsNonRoot: false
+    runAsUser: 0
+    runAsGroup: 0
+  tolerations:
+    - key: plane
+      operator: Equal
+      value: user-plane
+      effect: NoSchedule
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+      add: ["NET_ADMIN"]

@@ -19,9 +19,15 @@ spec:
         app.kubernetes.io/component: ue
         app.kubernetes.io/part-of: 5gcityverse
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: ueransim-ue
-          image: free5gc/ueransim:v4.0.1
+          image: 429555954826.dkr.ecr.ap-northeast-1.amazonaws.com/5gcityverse-prod-ueransim@sha256:58909d22fe2b1d24893fe26eb9502dac1056c85e4135fa87902bf3a1d1eb3e0b
           imagePullPolicy: IfNotPresent
           command: ["./nr-ue"]
           args: ["-c", "/etc/ueransim/ue-config.yaml", "-n", "50"]
@@ -33,11 +39,17 @@ spec:
               cpu: "1"
               memory: "1Gi"
           securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
-              add: ["NET_ADMIN"]
+              drop: ["ALL"]
+              add: ["NET_ADMIN", "MKNOD"]
           volumeMounts:
             - name: ue-config
               mountPath: /etc/ueransim
+              readOnly: true
+            - name: dev-net-tun
+              mountPath: /dev/net/tun
       volumes:
         - name: ue-config
           configMap:
@@ -45,3 +57,7 @@ spec:
             items:
               - key: ue-config.yaml
                 path: ue-config.yaml
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice

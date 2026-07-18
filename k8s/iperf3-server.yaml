@@ -4,7 +4,12 @@ metadata:
   name: iperf3-server
   namespace: free5gc
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: iperf3-server
@@ -13,11 +18,56 @@ spec:
       labels:
         app: iperf3-server
     spec:
+      automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: iperf3-server
+                topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: iperf3
-          image: networkstatic/iperf3:latest
+          image: networkstatic/iperf3@sha256:c1e4a239a83d1d60975bce1c9b7661af5517e362bf335f66a2c5b6adaeb4f19f
           imagePullPolicy: IfNotPresent
           command: ["iperf3", "-s", "-p", "5201"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            tcpSocket:
+              port: iperf3-tcp
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            tcpSocket:
+              port: iperf3-tcp
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: iperf3-tcp
+            periodSeconds: 10
+            failureThreshold: 3
           ports:
             - name: iperf3-tcp
               containerPort: 5201
@@ -25,6 +75,10 @@ spec:
             - name: iperf3-udp
               containerPort: 5201
               protocol: UDP
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service
@@ -32,9 +86,11 @@ metadata:
   name: iperf3-server
   namespace: free5gc
 spec:
+  # No clusterIP pinning: the backend's ensure_iperf3_server() reconciles this
+  # Service as a normal ClusterIP service; a headless spec here conflicts with
+  # it (clusterIP may not change once set — broke deploy 2026-07-05).
   selector:
     app: iperf3-server
-  clusterIP: None
   ports:
     - name: iperf3-tcp
       port: 5201
@@ -44,3 +100,37 @@ spec:
       port: 5201
       targetPort: 5201
       protocol: UDP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: iperf3-server
+  namespace: free5gc
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: iperf3-server
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: iperf3-server
+  namespace: free5gc
+spec:
+  podSelector:
+    matchLabels:
+      app: iperf3-server
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 5201
+          protocol: TCP
+        - port: 5201
+          protocol: UDP
+  egress:
+    - to:
+        - podSelector: {}

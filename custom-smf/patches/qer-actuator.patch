@@ -1,0 +1,406 @@
+diff --git a/internal/context/sm_context.go b/internal/context/sm_context.go
+index 4e3220e..07f7fa6 100644
+--- a/internal/context/sm_context.go
++++ b/internal/context/sm_context.go
+@@ -381,6 +381,15 @@ func GetSMContextByRef(ref string) *SMContext {
+ 	return smCtx
+ }
+ 
++func SMContextSnapshot() []*SMContext {
++	contexts := make([]*SMContext, 0)
++	smContextPool.Range(func(_, value interface{}) bool {
++		contexts = append(contexts, value.(*SMContext))
++		return true
++	})
++	return contexts
++}
++
+ func GetSMContextById(id string, pduSessID int32) *SMContext {
+ 	var smCtx *SMContext
+ 	ref, err := ResolveRef(id, pduSessID)
+diff --git a/internal/pfcp/message/build.go b/internal/pfcp/message/build.go
+index 9da7fb3..83c422e 100644
+--- a/internal/pfcp/message/build.go
++++ b/internal/pfcp/message/build.go
+@@ -181,6 +181,18 @@ func qerToCreateQER(qer *context.QER) *pfcp.CreateQER {
+ 	return createQER
+ }
+ 
++func qerToUpdateQER(qer *context.QER) *pfcp.UpdateQER {
++	return &pfcp.UpdateQER{
++		QERID: &pfcpType.QERID{
++			QERID: qer.QERID,
++		},
++		GateStatus:        qer.GateStatus,
++		QoSFlowIdentifier: &qer.QFI,
++		MaximumBitrate:    qer.MBR,
++		GuaranteedBitrate: qer.GBR,
++	}
++}
++
+ func urrToCreateURR(urr *context.URR) *pfcp.CreateURR {
+ 	createURR := new(pfcp.CreateURR)
+ 
+@@ -515,6 +527,7 @@ func BuildPfcpSessionModificationRequest(
+ 
+ 	msg.UpdatePDR = make([]*pfcp.UpdatePDR, 0, 2)
+ 	msg.UpdateFAR = make([]*pfcp.UpdateFAR, 0, 2)
++	msg.UpdateQER = make([]*pfcp.UpdateQER, 0, 2)
+ 	msg.UpdateURR = make([]*pfcp.UpdateURR, 0, 12)
+ 
+ 	nodeIDtoIP := upNodeID.ResolveNodeIdToIp().String()
+@@ -567,8 +580,15 @@ func BuildPfcpSessionModificationRequest(
+ 	}
+ 
+ 	for _, qer := range qerList {
+-		if qer.State == context.RULE_INITIAL {
++		switch qer.State {
++		case context.RULE_INITIAL:
+ 			msg.CreateQER = append(msg.CreateQER, qerToCreateQER(qer))
++		case context.RULE_UPDATE:
++			msg.UpdateQER = append(msg.UpdateQER, qerToUpdateQER(qer))
++		case context.RULE_REMOVE:
++			msg.RemoveQER = append(msg.RemoveQER, &pfcp.RemoveQER{
++				QERID: &pfcpType.QERID{QERID: qer.QERID},
++			})
+ 		}
+ 		qer.State = context.RULE_CREATE
+ 	}
+diff --git a/internal/pfcp/message/build_test.go b/internal/pfcp/message/build_test.go
+index ff38a20..fc21b5d 100644
+--- a/internal/pfcp/message/build_test.go
++++ b/internal/pfcp/message/build_test.go
+@@ -230,6 +230,26 @@ func TestBuildPfcpSessionModificationRequest(t *testing.T) {
+ 	assert.Equal(t, len(req.CreateURR), 1)
+ }
+ 
++func TestBuildPfcpSessionModificationRequestUpdatesQER(t *testing.T) {
++	initSmfContext()
++	smctx := context.NewSMContext("imsi-208930000000001", 10)
++	_, _, _, qerList, _ := initRuleList()
++	smctx.PFCPContext["10.4.0.1"] = &context.PFCPSessionContext{}
++	qerList[0].State = context.RULE_UPDATE
++	qerList[0].MBR = &pfcpType.MBR{ULMBR: 12000, DLMBR: 34000}
++
++	req, err := message.BuildPfcpSessionModificationRequest(
++		*testNodeID, "10.4.0.1", "test-uuid", smctx, nil, nil, nil, qerList, nil)
++	assert.NoError(t, err)
++	assert.Empty(t, req.CreateQER)
++	if assert.Len(t, req.UpdateQER, 1) {
++		assert.Equal(t, qerList[0].QERID, req.UpdateQER[0].QERID.QERID)
++		assert.Equal(t, uint64(12000), req.UpdateQER[0].MaximumBitrate.ULMBR)
++		assert.Equal(t, uint64(34000), req.UpdateQER[0].MaximumBitrate.DLMBR)
++	}
++	assert.Equal(t, context.RULE_CREATE, qerList[0].State)
++}
++
+ func TestBuildPfcpSessionModificationResponse(t *testing.T) {
+ 	initSmfContext()
+ 	rsp, err := message.BuildPfcpSessionEstablishmentResponse()
+diff --git a/internal/sbi/api_oam.go b/internal/sbi/api_oam.go
+index 7541c5a..754e867 100644
+--- a/internal/sbi/api_oam.go
++++ b/internal/sbi/api_oam.go
+@@ -1,7 +1,10 @@
+ package sbi
+ 
+ import (
++	"crypto/subtle"
+ 	"net/http"
++	"os"
++	"strings"
+ 
+ 	"github.com/gin-gonic/gin"
+ )
+@@ -28,7 +31,77 @@ func (s *Server) getOAMRoutes() []Route {
+ 			Pattern: "/user-plane-info/",
+ 			APIFunc: s.HTTPGetSMFUserPlaneInfo,
+ 		},
++		{
++			Name:    "Actuate PFCP QER MBR",
++			Method:  http.MethodPost,
++			Pattern: "/qer-actuation",
++			APIFunc: s.HTTPActuateQER,
++		},
++	}
++}
++
++type qerActuationRequest struct {
++	SMContextRef    string `json:"smContextRef"`
++	DNN             string `json:"dnn"`
++	SST             int32  `json:"sst"`
++	SD              string `json:"sd"`
++	UplinkMBRKbps   uint64 `json:"uplinkMbrKbps"`
++	DownlinkMBRKbps uint64 `json:"downlinkMbrKbps"`
++}
++
++func qerActuatorAuthorized(c *gin.Context) (bool, int, string) {
++	tokenFile := strings.TrimSpace(os.Getenv("SMF_QER_ACTUATOR_TOKEN_FILE"))
++	if tokenFile == "" {
++		return false, http.StatusServiceUnavailable, "actuator token is not configured"
++	}
++	expectedBytes, err := os.ReadFile(tokenFile)
++	if err != nil || strings.TrimSpace(string(expectedBytes)) == "" {
++		return false, http.StatusServiceUnavailable, "actuator token is unavailable"
++	}
++	expected := []byte(strings.TrimSpace(string(expectedBytes)))
++	provided := []byte(c.GetHeader("X-SMF-QER-Actuator-Token"))
++	if len(expected) != len(provided) || subtle.ConstantTimeCompare(expected, provided) != 1 {
++		return false, http.StatusUnauthorized, "unauthorized"
++	}
++	return true, http.StatusOK, ""
++}
++
++func (s *Server) HTTPActuateQER(c *gin.Context) {
++	if ok, status, message := qerActuatorAuthorized(c); !ok {
++		c.JSON(status, gin.H{"error": message})
++		return
++	}
++	var request qerActuationRequest
++	if err := c.ShouldBindJSON(&request); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body"})
++		return
++	}
++	request.SMContextRef = strings.TrimSpace(request.SMContextRef)
++	request.DNN = strings.TrimSpace(request.DNN)
++	request.SD = strings.TrimSpace(request.SD)
++	selectors := 0
++	if request.SMContextRef != "" {
++		selectors++
++	}
++	if request.DNN != "" {
++		selectors++
++	}
++	if request.SST != 0 || request.SD != "" {
++		selectors++
++	}
++	if selectors != 1 || (request.SST == 0) != (request.SD == "") {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "exactly one complete selector is required: smContextRef, dnn, or sst+sd"})
++		return
++	}
++	const maxMBRKbps = uint64(500000)
++	if request.UplinkMBRKbps == 0 || request.DownlinkMBRKbps == 0 ||
++		request.UplinkMBRKbps > maxMBRKbps || request.DownlinkMBRKbps > maxMBRKbps {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "MBR must be between 1 and 500000 Kbps"})
++		return
+ 	}
++	s.Processor().HandleOAMQERActuation(
++		c, request.SMContextRef, request.DNN, request.SST, request.SD,
++		request.UplinkMBRKbps, request.DownlinkMBRKbps)
+ }
+ 
+ func (s *Server) HTTPGetUEPDUSessionInfo(c *gin.Context) {
+diff --git a/internal/sbi/processor/oam_qer.go b/internal/sbi/processor/oam_qer.go
+new file mode 100755
+index 0000000..759bff4
+--- /dev/null
++++ b/internal/sbi/processor/oam_qer.go
+@@ -0,0 +1,208 @@
++package processor
++
++import (
++	"fmt"
++	"net/http"
++
++	"github.com/gin-gonic/gin"
++
++	"github.com/free5gc/pfcp"
++	"github.com/free5gc/pfcp/pfcpType"
++	smf_context "github.com/free5gc/smf/internal/context"
++	pfcp_message "github.com/free5gc/smf/internal/pfcp/message"
++)
++
++type qerActuationResult struct {
++	SMContextRef         string `json:"smContextRef"`
++	DNN                  string `json:"dnn"`
++	SST                  int32  `json:"sst"`
++	SD                   string `json:"sd"`
++	Status               string `json:"status"`
++	UpdatedQERs          int    `json:"updatedQers"`
++	ReconciliationNeeded bool   `json:"reconciliationRequired"`
++	Error                string `json:"error,omitempty"`
++}
++
++type qerRollback struct {
++	upf      *smf_context.UPF
++	qer      *smf_context.QER
++	previous *pfcpType.MBR
++}
++
++func pfcpQERUpdateAccepted(upf *smf_context.UPF, smContext *smf_context.SMContext,
++	qer *smf_context.QER,
++) error {
++	rcvMsg, err := pfcp_message.SendPfcpSessionModificationRequest(
++		upf, smContext, nil, nil, nil, []*smf_context.QER{qer}, nil)
++	if err != nil {
++		return err
++	}
++	rsp, ok := rcvMsg.PfcpMessage.Body.(pfcp.PFCPSessionModificationResponse)
++	if !ok {
++		return fmt.Errorf("unexpected PFCP response body %T", rcvMsg.PfcpMessage.Body)
++	}
++	if rsp.Cause == nil {
++		return fmt.Errorf("PFCP Session Modification response has no cause")
++	}
++	if rsp.Cause.CauseValue != pfcpType.CauseRequestAccepted {
++		return fmt.Errorf("PFCP Session Modification rejected with cause %d", rsp.Cause.CauseValue)
++	}
++	pfcpContext := smContext.PFCPContext[upf.NodeID.ResolveNodeIdToIp().String()]
++	if pfcpContext != nil {
++		sst := int32(0)
++		sd := ""
++		if smContext.SNssai != nil {
++			sst = smContext.SNssai.Sst
++			sd = smContext.SNssai.Sd
++		}
++		// This line is consumed by the independent kernel/PFCP evidence reader.
++		// Repeat the generic SEID/TEID keys so its strict intersection check can
++		// match either direction without trusting an actuator-only identifier.
++		smContext.Log.Infof("PFCP Session Modification Request sent; PFCP Session Modification Response accepted SEID=%d SEID=%d TEID=0x%x TEID=0x%x QERID=%d SST=%d SD=%s DNN=%s UPF=%s ULMBRKbps=%d DLMBRKbps=%d",
++			pfcpContext.LocalSEID, pfcpContext.RemoteSEID, smContext.LocalULTeid, smContext.LocalDLTeid,
++			qer.QERID, sst, sd, smContext.Dnn, upf.NodeID.ResolveNodeIdToIp().String(), qer.MBR.ULMBR, qer.MBR.DLMBR)
++	}
++	return nil
++}
++
++func rollbackQERs(smContext *smf_context.SMContext, updates []qerRollback) bool {
++	rollbackOK := true
++	for i := len(updates) - 1; i >= 0; i-- {
++		update := updates[i]
++		update.qer.MBR = update.previous
++		update.qer.State = smf_context.RULE_UPDATE
++		if err := pfcpQERUpdateAccepted(update.upf, smContext, update.qer); err != nil {
++			rollbackOK = false
++		}
++	}
++	return rollbackOK
++}
++
++func actuateSMContextQER(smContext *smf_context.SMContext, dnn string, sst int32, sd string,
++	uplinkMBRKbps, downlinkMBRKbps uint64,
++) qerActuationResult {
++	result := qerActuationResult{SMContextRef: smContext.Ref, Status: "failed"}
++	smContext.SMLock.Lock()
++	defer smContext.SMLock.Unlock()
++
++	if smf_context.GetSMContextByRef(smContext.Ref) != smContext {
++		result.Error = "SM context is no longer active"
++		return result
++	}
++	result.DNN = smContext.Dnn
++	if smContext.SNssai != nil {
++		result.SST = smContext.SNssai.Sst
++		result.SD = smContext.SNssai.Sd
++	}
++	if dnn != "" && smContext.Dnn != dnn {
++		result.Status = "skipped"
++		return result
++	}
++	if sst != 0 && (smContext.SNssai == nil || smContext.SNssai.Sst != sst || smContext.SNssai.Sd != sd) {
++		result.Status = "skipped"
++		return result
++	}
++	if smContext.State() != smf_context.Active {
++		result.Error = fmt.Sprintf("SM context state is %s", smContext.State())
++		return result
++	}
++
++	updates := make([]qerRollback, 0, len(smContext.AMBRQerMap))
++	seen := make(map[string]struct{})
++	for upfID, qerID := range smContext.AMBRQerMap {
++		qerKey := fmt.Sprintf("%s:%d", upfID.String(), qerID)
++		if _, duplicate := seen[qerKey]; duplicate {
++			continue
++		}
++		seen[qerKey] = struct{}{}
++		upf := smf_context.GetUpfById(upfID.String())
++		if upf == nil {
++			result.Error = fmt.Sprintf("UPF %s is unavailable", upfID.String())
++			rollbackQERs(smContext, updates)
++			return result
++		}
++		nodeIP := upf.NodeID.ResolveNodeIdToIp().String()
++		pfcpContext, ok := smContext.PFCPContext[nodeIP]
++		if !ok || pfcpContext.RemoteSEID == 0 {
++			result.Error = fmt.Sprintf("PFCP session for UPF %s is not established", nodeIP)
++			rollbackQERs(smContext, updates)
++			return result
++		}
++		qer := upf.GetQERById(qerID)
++		if qer == nil || qer.MBR == nil {
++			result.Error = fmt.Sprintf("AMBR QER %d is unavailable", qerID)
++			rollbackQERs(smContext, updates)
++			return result
++		}
++		previous := *qer.MBR
++		updates = append(updates, qerRollback{upf: upf, qer: qer, previous: &previous})
++		qer.MBR = &pfcpType.MBR{ULMBR: uplinkMBRKbps, DLMBR: downlinkMBRKbps}
++		qer.State = smf_context.RULE_UPDATE
++		if err := pfcpQERUpdateAccepted(upf, smContext, qer); err != nil {
++			result.Error = err.Error()
++			if rollbackQERs(smContext, updates) {
++				result.Status = "rolled_back"
++			} else {
++				result.Status = "indeterminate"
++				result.ReconciliationNeeded = true
++			}
++			return result
++		}
++		result.UpdatedQERs++
++	}
++	if result.UpdatedQERs == 0 {
++		result.Error = "no established AMBR QER was found"
++		return result
++	}
++	result.Status = "applied"
++	return result
++}
++
++func (p *Processor) HandleOAMQERActuation(c *gin.Context, smContextRef, dnn string, sst int32, sd string,
++	uplinkMBRKbps, downlinkMBRKbps uint64,
++) {
++	contexts := make([]*smf_context.SMContext, 0)
++	if smContextRef != "" {
++		if smContext := smf_context.GetSMContextByRef(smContextRef); smContext != nil {
++			contexts = append(contexts, smContext)
++		}
++	} else {
++		contexts = smf_context.SMContextSnapshot()
++	}
++	if len(contexts) == 0 {
++		c.JSON(http.StatusNotFound, gin.H{"error": "no matching SM context"})
++		return
++	}
++
++	results := make([]qerActuationResult, 0, len(contexts))
++	matched := 0
++	applied := 0
++	for _, smContext := range contexts {
++		result := actuateSMContextQER(smContext, dnn, sst, sd, uplinkMBRKbps, downlinkMBRKbps)
++		if result.Status == "skipped" {
++			continue
++		}
++		matched++
++		if result.Status == "applied" {
++			applied++
++		}
++		results = append(results, result)
++	}
++	if matched == 0 {
++		c.JSON(http.StatusNotFound, gin.H{"error": "no matching active SM context"})
++		return
++	}
++	statusCode := http.StatusOK
++	if applied == 0 {
++		statusCode = http.StatusBadGateway
++	} else if applied != matched {
++		statusCode = http.StatusMultiStatus
++	}
++	c.JSON(statusCode, gin.H{
++		"matchedSessions": matched,
++		"appliedSessions": applied,
++		"uplinkMbrKbps":   uplinkMBRKbps,
++		"downlinkMbrKbps": downlinkMBRKbps,
++		"results":         results,
++	})
++}

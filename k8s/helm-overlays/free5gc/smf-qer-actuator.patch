@@ -1,0 +1,65 @@
+diff --git a/charts/free5gc/charts/free5gc-smf/templates/smf-deployment.yaml b/charts/free5gc/charts/free5gc-smf/templates/smf-deployment.yaml
+index 537578a..865cc94 100644
+--- a/charts/free5gc/charts/free5gc-smf/templates/smf-deployment.yaml
++++ b/charts/free5gc/charts/free5gc-smf/templates/smf-deployment.yaml
+@@ -91,6 +91,10 @@ spec:
+         env:
+           - name: GIN_MODE
+             value: release
++        {{- if .actuator.enabled }}
++          - name: SMF_QER_ACTUATOR_TOKEN_FILE
++            value: /var/run/secrets/5gcityverse/qer-actuator/token
++        {{- end }}
+         {{- if .readinessProbe.enabled }}
+         readinessProbe:
+           {{- if .readinessProbe.httpGet }}
+@@ -130,6 +134,11 @@ spec:
+           name: {{ include "free5gc-smf.fullname" $ }}-empty-volume
+         - mountPath: {{ .volume.certmount }}
+           name: {{ include "free5gc-smf.fullname" $ }}-cert-volume
++        {{- if .actuator.enabled }}
++        - mountPath: /var/run/secrets/5gcityverse/qer-actuator
++          name: qer-actuator-token
++          readOnly: true
++        {{- end }}
+         resources:
+             {{- toYaml .resources | nindent 12 }}
+       dnsPolicy: ClusterFirst
+@@ -173,4 +182,13 @@ spec:
+               items:
+                 - key: nrf.pem
+                   path: nrf.pem
++      {{- if .actuator.enabled }}
++      - name: qer-actuator-token
++        secret:
++          secretName: {{ .actuator.secretName }}
++          defaultMode: 0400
++          items:
++            - key: {{ .actuator.tokenKey }}
++              path: token
++      {{- end }}
+ {{- end }}
+diff --git a/charts/free5gc/charts/free5gc-smf/values.yaml b/charts/free5gc/charts/free5gc-smf/values.yaml
+index bc71d5a..89a9770 100644
+--- a/charts/free5gc/charts/free5gc-smf/values.yaml
++++ b/charts/free5gc/charts/free5gc-smf/values.yaml
+@@ -58,6 +58,10 @@ isPfcpNeeded: true
+ smf:
+   name: smf
+   replicaCount: 1
++  actuator:
++    enabled: false
++    secretName: smf-qer-actuator-token
++    tokenKey: token
+   image:
+     name: free5gc/smf
+     tag: v4.2.2
+@@ -279,4 +283,4 @@ smf:
+     logger: # log output setting
+       enable: true # true or false
+       level: trace # how detailed to output, value: trace, debug, info, warn, error, fatal, panic
+-      reportCaller: false # enable the caller report or not, value: true or false
+\ No newline at end of file
++      reportCaller: false # enable the caller report or not, value: true or false
+warning: in the working copy of 'charts/free5gc/charts/free5gc-smf/templates/smf-deployment.yaml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'charts/free5gc/charts/free5gc-smf/values.yaml', LF will be replaced by CRLF the next time Git touches it

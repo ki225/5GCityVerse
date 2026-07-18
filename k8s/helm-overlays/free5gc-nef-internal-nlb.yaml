@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: free5gc-nef-private
+  namespace: free5gc
+  labels:
+    app.kubernetes.io/name: free5gc-nef
+    app.kubernetes.io/instance: free5gc
+    app.kubernetes.io/component: private-nef-endpoint
+  annotations:
+    # The deployment uses the EKS/in-tree Service controller and instance
+    # targets; it does not silently assume AWS Load Balancer Controller or
+    # pod-IP target registration.
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  loadBalancerSourceRanges:
+    - 10.60.20.0/24
+    - 10.60.21.0/24
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: free5gc-nef
+    app.kubernetes.io/instance: free5gc
+    project: free5gc
+    nf: nef
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: free5gc-nef-private-ingress
+  namespace: free5gc
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: free5gc-nef
+      app.kubernetes.io/instance: free5gc
+      project: free5gc
+      nf: nef
+  policyTypes:
+    - Ingress
+  ingress:
+    # Lambda ENIs, NLB nodes and EKS nodes all reside in the two tagged private
+    # subnets. The Lambda SG separately limits its own NEF egress to TCP/8080.
+    - from:
+        - ipBlock:
+            cidr: 10.60.20.0/24
+        - ipBlock:
+            cidr: 10.60.21.0/24
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Preserve SBI calls from other free5GC NFs in this namespace. VPC CNI
+    # NetworkPolicy combines this identity rule with the private-subnet gate.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080

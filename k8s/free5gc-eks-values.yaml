@@ -1,21 +1,95 @@
 global:
   userPlaneArchitecture: single
   uesubnet: 10.100.0.0/16
+  # EKS managed nodes do not expose a stable, unmanaged eth1 for free5GC
+  # Multus ipvlan attachments. Keep chart-level Multus disabled unless the
+  # node bootstrap path also provisions dedicated host ENIs for N2/N3/N4/N6.
+  # UERANSIM reaches AMF through the chart's NGAP NodePort service instead.
+  amf:
+    multus:
+      enabled: false
+      n2if:
+        ipAddress: 10.60.12.100   # AMF N2 (NGAP/SCTP toward gNB)
+      n2network:
+        enabled: true
+        name: n2network
+        type: ipvlan               # ipvlan required for AWS VPC ENI compatibility
+        masterIf: eth1
+        subnetIP: "10.60.12.0"
+        cidrBlock: 24
+        gatewayIP: "10.60.12.1"
+        excludeIP: "10.60.12.254"
+  upf:
+    multus:
+      enabled: false
+      upf:
+        n3if:
+          ipAddress: 10.60.10.100  # UPF N3 (GTP-U from gNB)
+        n4if:
+          ipAddress: 10.60.11.100  # UPF N4 (PFCP from SMF)
+        n6if:
+          ipAddress: 10.60.13.100  # UPF N6 (egress to Data Network / internet)
+      n3network:
+        name: n3network
+        type: ipvlan
+        masterIf: eth1
+        subnetIP: "10.60.10.0"
+        cidrBlock: 24
+        gatewayIP: "10.60.10.1"
+        excludeIP: "10.60.10.254"
+      n4network:
+        name: n4network
+        type: ipvlan
+        masterIf: eth1
+        subnetIP: "10.60.11.0"
+        cidrBlock: 24
+        gatewayIP: "10.60.11.1"
+        excludeIP: "10.60.11.254"
+      n6network:
+        name: n6network
+        type: ipvlan
+        masterIf: eth1
+        subnetIP: "10.60.13.0"
+        cidrBlock: 24
+        gatewayIP: "10.60.13.1"
+        excludeIP: "10.60.13.254"
+  # ───────────────────────────────────────────────────────────────────────────
 free5gc-upf:
   global:
     userPlaneArchitecture: single
     uesubnet: 10.100.0.0/16
   upf:
+    # Schedule UPF exclusively on user-plane nodes. Multus annotations stay
+    # disabled for EKS managed nodes because there is no stable host eth1.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: plane
+                  operator: In
+                  values:
+                    - user-plane
+    tolerations:
+      - key: plane
+        operator: Equal
+        value: user-plane
+        effect: NoSchedule
+    # ────────────────────────────────────────────────────────────────────────────
     podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
       sysctls: []
     securityContext:
-      privileged: true
-      allowPrivilegeEscalation: true
+      privileged: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
       capabilities:
+        drop:
+          - ALL
         add:
           - NET_ADMIN
-          - NET_RAW
-          - SYS_MODULE
     resources:
       requests:
         cpu: 250m
@@ -27,16 +101,32 @@ free5gc-upf:
       dnnList:
         - dnn: internet
           cidr: 10.100.1.0/24
+        - dnn: internet
+          cidr: 10.100.2.0/24
         - dnn: emergency
           cidr: 10.100.3.0/24
         - dnn: iot
-          cidr: 10.100.4.0/24
+          cidr: 10.100.40.0/20
+        - dnn: internet
+          cidr: 10.100.5.0/24
       logger:
         enable: true
         level: trace
         reportCaller: false
 free5gc-amf:
   amf:
+    # Schedule AMF on control-plane nodes. UERANSIM connects through the AMF
+    # NGAP NodePort service instead of a Multus N2 interface.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: plane
+                  operator: In
+                  values:
+                    - control-plane
+    # ────────────────────────────────────────────────────────────────────────────
     configuration:
       configuration: |-
         amfName: AMF
@@ -72,9 +162,10 @@ free5gc-amf:
               - sst: 4
                 sd: 000005
         supportDnnList:
-          - internet
+          - citizen
           - emergency
           - iot
+          - v2x
         security:
           integrityOrder:
             - NIA2
@@ -139,10 +230,81 @@ free5gc-amf:
           maxAttempts: 2
           maxInitTimeout: 2
         defaultUECtxReq: false
+free5gc-nssf:
+  nssf:
+    configuration:
+      configuration: |-
+        nssfName: NSSF
+        supportedPlmnList:
+          - mcc: 208
+            mnc: 93
+        supportedNssaiInPlmnList:
+          - plmnId:
+              mcc: 208
+              mnc: 93
+            supportedSnssaiList:
+              - sst: 1
+                sd: 000001
+              - sst: 2
+                sd: 000002
+              - sst: 2
+                sd: 000003
+              - sst: 3
+                sd: 000004
+              - sst: 4
+                sd: 000005
+        amfList:
+          - nfId: ffa2e8d7-3275-49c7-8631-6af1df1d9d26
+            supportedNssaiAvailabilityData:
+              - tai:
+                  plmnId:
+                    mcc: 208
+                    mnc: 93
+                  tac: 000001
+                supportedSnssaiList:
+                  - sst: 1
+                    sd: 000001
+                  - sst: 2
+                    sd: 000002
+                  - sst: 2
+                    sd: 000003
+                  - sst: 3
+                    sd: 000004
+                  - sst: 4
+                    sd: 000005
+        taList:
+          - tai:
+              plmnId:
+                mcc: 208
+                mnc: 93
+              tac: 000001
+            accessType: 3GPP_ACCESS
+            supportedSnssaiList:
+              - sst: 1
+                sd: 000001
+              - sst: 2
+                sd: 000002
+              - sst: 2
+                sd: 000003
+              - sst: 3
+                sd: 000004
+              - sst: 4
+                sd: 000005
 free5gc-smf:
   global:
     userPlaneArchitecture: single
   smf:
+    # ── CP/UP Separation: schedule SMF exclusively on control-plane nodes ───────
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: plane
+                  operator: In
+                  values:
+                    - control-plane
+    # ────────────────────────────────────────────────────────────────────────────
     configuration:
       configuration: |-
         smfName: SMF
@@ -167,7 +329,7 @@ free5gc-smf:
               sst: 2
               sd: 000003
             dnnInfos:
-              - dnn: emergency
+              - dnn: internet
                 dns:
                   ipv4: 8.8.8.8
                   ipv6: 2001:4860:4860::8888
@@ -175,7 +337,7 @@ free5gc-smf:
               sst: 3
               sd: 000004
             dnnInfos:
-              - dnn: iot
+              - dnn: internet
                 dns:
                   ipv4: 8.8.8.8
                   ipv6: 2001:4860:4860::8888
@@ -216,16 +378,16 @@ free5gc-smf:
                     sst: 2
                     sd: 000003
                   dnnUpfInfoList:
-                    - dnn: emergency
+                    - dnn: internet
                       pools:
                         - cidr: 10.100.3.0/24
                 - sNssai:
                     sst: 3
                     sd: 000004
                   dnnUpfInfoList:
-                    - dnn: iot
+                    - dnn: internet
                       pools:
-                        - cidr: 10.100.4.0/24
+                        - cidr: 10.100.40.0/20
                 - sNssai:
                     sst: 4
                     sd: 000005
@@ -262,9 +424,23 @@ free5gc-smf:
               B: UPF
 free5gc-webui:
   webui:
+    # ── CP/UP Separation: schedule WebUI on control-plane nodes ─────────────────
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: plane
+                  operator: In
+                  values:
+                    - control-plane
+    # ────────────────────────────────────────────────────────────────────────────
     service:
-      type: LoadBalancer
+      # Keep the chart-owned service off the public load-balancer path. A
+      # repository-owned internal NLB overlay is the only Lambda endpoint.
+      type: NodePort
       port: 5000
+      nodePort: 30500
 mongodb:
   extraDeploy: []
   persistence:

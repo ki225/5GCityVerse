@@ -14,6 +14,8 @@ data:
     amf: "8000"
     imei: "356938035643803"
     imeiSv: "4370816125816151"
+    gnbSearchList:
+      - gnb-service.free5gc.svc.cluster.local
     uacAic:
       mps: false
       mcs: false
@@ -26,7 +28,7 @@ data:
       class15: false
     sessions:
       - type: "IPv4"
-        apn: "internet"
+        apn: "citizen"
         slice:
           sst: 0x01
           sd: 0x000001
