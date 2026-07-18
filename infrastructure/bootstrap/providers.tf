@@ -16,21 +16,7 @@ provider "aws" {
     tags = {
       Project     = "5GCityVerse"
       Environment = var.environment
-      Terraform   = "true"
-    }
-  }
-}
-
-# CloudFront-scoped WAFv2 resources must be created in us-east-1.
-provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
-
-  default_tags {
-    tags = {
-      Project     = "5GCityVerse"
-      Environment = var.environment
-      Terraform   = "true"
+      Terraform   = "bootstrap"
     }
   }
 }

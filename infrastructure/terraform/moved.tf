@@ -3,6 +3,12 @@ moved {
   to   = module.backend_lambda.aws_cloudwatch_log_group.lambda[0]
 }
 
+# Node group renamed: free5gc → free5gc_cp (CP/UP separation refactor)
+moved {
+  from = aws_eks_node_group.free5gc
+  to   = aws_eks_node_group.free5gc_cp
+}
+
 moved {
   from = aws_lambda_function.backend
   to   = module.backend_lambda.aws_lambda_function.this[0]

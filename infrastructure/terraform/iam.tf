@@ -14,6 +14,29 @@ resource "aws_iam_role" "lambda" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 
+data "aws_iam_policy_document" "lambda_vpc_eni" {
+  statement {
+    sid = "ManageLambdaVpcEnis"
+    actions = [
+      "ec2:AssignPrivateIpAddresses",
+      "ec2:CreateNetworkInterface",
+      "ec2:DeleteNetworkInterface",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeSubnets",
+      "ec2:UnassignPrivateIpAddresses",
+    ]
+    # EC2 ENI lifecycle APIs do not support resource-level permissions.  The
+    # role is dedicated to these four project Lambdas and their VPC attachment.
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_vpc_eni" {
+  name   = "${local.lambda_name}-vpc-eni"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.lambda_vpc_eni.json
+}
+
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
     actions = [
@@ -47,6 +70,14 @@ data "aws_iam_policy_document" "lambda_policy" {
   statement {
     actions   = ["eks:DescribeCluster"]
     resources = [aws_eks_cluster.free5gc.arn]
+  }
+
+  statement {
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      aws_secretsmanager_secret.free5gc_webui.arn,
+      aws_secretsmanager_secret.smf_qer_actuator.arn,
+    ]
   }
 
   statement {
