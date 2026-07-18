@@ -143,7 +143,7 @@
         }
       ],
       "ResultPath": "$.slice_actions",
-      "Next": "ScaleAMF"
+      "Next": "WaitForTrafficRise"
     },
 
     "ActivateV2XSlice": {
@@ -190,7 +190,7 @@
         }
       },
       "ResultPath": "$.slice_actions",
-      "Next": "ScaleAMF"
+      "Next": "WaitForTrafficRise"
     },
 
     "WaitForTrafficRise": {
@@ -215,43 +215,11 @@
       "Choices": [
         {
           "Variable": "$.analytics.Payload.upf_cpu_percent",
-          "NumericGreaterThan": 50,
-          "Next": "ScaleUPF"
+          "NumericGreaterThan": 70,
+          "Next": "UpdateDynamoDB"
         }
       ],
       "Default": "UpdateDynamoDB"
-    },
-
-    "ScaleUPF": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${HpaUpdateLambdaArn}",
-        "Payload": {
-          "parameters": [
-            {"name": "component",        "value": "UPF"},
-            {"name": "target_replicas",  "value": "4"}
-          ]
-        }
-      },
-      "ResultPath": "$.hpa_result",
-      "Next": "UpdateDynamoDB"
-    },
-
-    "ScaleAMF": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "${HpaUpdateLambdaArn}",
-        "Payload": {
-          "parameters": [
-            {"name": "component",       "value": "AMF"},
-            {"name": "target_replicas", "value": "3"}
-          ]
-        }
-      },
-      "ResultPath": "$.hpa_result",
-      "Next": "UpdateDynamoDB"
     },
 
     "UpdateDynamoDB": {

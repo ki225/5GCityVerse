@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - keeps Lambda usable if pydantic is not
     class ValidationError(ValueError):
         pass
 
-from constants import DataSource, EventType, RiskLevel, SliceType
+from constants import DataSource, EventType, RiskLevel, SliceStrategy, SliceType
 
 
 class CityVerseModel(BaseModel):
@@ -49,7 +49,6 @@ class EventConfig(CityVerseModel):
     ue_ids: list[str]
     dnn: str
     risk: RiskLevel
-    score: int = Field(ge=0, le=100)
     imsi_suffix: str
     five_qi: int = Field(ge=1)
     ue_ambr: Bandwidth
@@ -59,20 +58,41 @@ class EventConfig(CityVerseModel):
     traffic_profile: str
 
 
-class TriggerRequest(CityVerseModel):
+class ScenarioTrigger(CityVerseModel):
     event_type: EventType
+    event_scale: int = 0
+
+
+class TriggerRequest(CityVerseModel):
+    event_type: EventType | None = None
+    event_scale: int = 0
+    city_residents: int = 0
+    scenarios: list[ScenarioTrigger] = Field(default_factory=list)
+    # Safe default: an omitted field must never silently opt a caller into AI/NEF
+    # orchestration. Browser clients explicitly select and submit one strategy.
+    slice_strategy: SliceStrategy = SliceStrategy.NONE
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        # pydantic validates the enum when packaged. The Lambda zip intentionally
+        # supports a dependency-free fallback BaseModel too, so enforce the same
+        # contract here rather than accepting arbitrary strings in production.
+        try:
+            self.slice_strategy = SliceStrategy(self.slice_strategy)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("slice_strategy must be one of: none, static, ai") from exc
 
 
 class NetworkMetrics(CityVerseModel):
-    upfCpuPercent: float = 18.5
-    upfPodCount: int = 1
-    amfPodCount: int = 1
+    upfCpuPercent: float = 0.0
+    upfPodCount: int = 0
+    amfPodCount: int = 0
     gtpPacketsPerSec: int = 0
     pduSessionCount: int = 0
-    latencyMs: float = 8.0
-    throughputMbps: float = 100.0
+    latencyMs: float = 0.0
+    throughputMbps: float = 0.0
     timestamp: int
-    dataSource: DataSource = DataSource.SIMULATED
+    dataSource: DataSource = DataSource.UNAVAILABLE
     amfCpuPercent: float | None = None
     registeredUeCount: int | None = None
     uplinkMbps: float | None = None

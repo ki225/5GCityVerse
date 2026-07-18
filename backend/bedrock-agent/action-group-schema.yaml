@@ -33,6 +33,41 @@ paths:
                   slice_loads:        { type: array, items: { type: object } }
                   scale_recommendation: { type: string }
 
+  /list_subscribers:
+    get:
+      operationId: list_subscribers
+      summary: "List free5GC subscribers visible to the agent"
+      description: >
+        Reads free5GC subscriber records and returns the CityVerse-scoped subset
+        for observation before profile changes.
+      responses:
+        "200":
+          description: "Subscriber list"
+
+  /upsert_subscriber_profile:
+    post:
+      operationId: upsert_subscriber_profile
+      summary: "Create or update subscriber and profile data for an event intent"
+      description: >
+        Writes free5GC subscriber/profile data for the target event, including
+        NSSAI, DNN, AMBR, QoS flow, and 5QI information.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type, execution_id]
+              properties:
+                event_type:
+                  type: string
+                  enum: [concert, typhoon, accident, medical, iot_surge]
+                execution_id:
+                  type: string
+      responses:
+        "200":
+          description: "Subscriber/profile upsert result"
+
   /create_pfd_rule:
     post:
       operationId: create_pfd_rule
@@ -139,3 +174,55 @@ paths:
       responses:
         "200":
           description: "HPA patch result"
+
+  /patch_hpa:
+    post:
+      operationId: patch_hpa
+      summary: "Patch bounded HPA policy for a free5GC component"
+      description: >
+        Adjusts HPA bounds or target replicas for UPF, AMF, or SMF. The executor
+        must enforce configured max replicas before invoking this tool.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [component, target_replicas]
+              properties:
+                component:
+                  type: string
+                  enum: [UPF, AMF, SMF]
+                target_replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 4
+      responses:
+        "200":
+          description: "Bounded HPA patch result"
+
+  /verify_sla:
+    post:
+      operationId: verify_sla
+      summary: "Verify post-action SLA against live network analytics"
+      description: >
+        Re-reads network metrics and compares latency, throughput, sessions,
+        UPF CPU, and slice load against the intent SLA.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type]
+              properties:
+                event_type:
+                  type: string
+                  enum: [concert, typhoon, accident, medical, iot_surge]
+                max_adaptation_rounds:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+      responses:
+        "200":
+          description: "SLA verification result"

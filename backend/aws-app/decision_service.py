@@ -14,17 +14,17 @@ class AgentDecisionService:
         free5gc_result: dict[str, Any],
         environment_result: dict[str, Any],
         observed_metrics: dict[str, Any],
-        projected_metrics: dict[str, Any],
-        projected_slices: list[dict[str, Any]],
+        current_metrics: dict[str, Any],
+        current_slices: list[dict[str, Any]],
     ) -> dict[str, Any]:
         free5gc_action_status = "success" if free5gc_result.get("status") == "success" else "failed"
         environment_action_status = "success" if environment_result.get("status") == "success" else "failed"
-        target_slice = next((item for item in projected_slices if item["sst"] == cfg.slice_sst), None)
+        target_slice = next((item for item in current_slices if item["sst"] == cfg.slice_sst), None)
         target_load = target_slice["load"] if target_slice else 0
-        observations = self.build_observations(event_type, cfg, observed_metrics, projected_metrics, target_slice)
+        observations = self.build_observations(event_type, cfg, observed_metrics, current_metrics, target_slice)
         hypotheses = self.build_hypotheses(event_type, cfg, observed_metrics, target_load)
         selected_plan, rejected_plans = self.choose_plan(event_type, cfg, observed_metrics, target_load)
-        verification = self.build_verification_checks(cfg, observed_metrics, projected_metrics, target_load)
+        verification = self.build_verification_checks(cfg, observed_metrics, current_metrics, target_load)
         selected_plan["status"] = "executing" if environment_action_status == "success" else "degraded"
 
         return {
@@ -83,7 +83,6 @@ class AgentDecisionService:
             ],
             "verification": verification,
             "expectedOutcome": selected_plan["expectedImpact"],
-            "score": cfg.score,
             "startedAt": TimeUtils.now(),
         }
 
@@ -92,7 +91,7 @@ class AgentDecisionService:
         event_type: str,
         cfg: EventConfig,
         observed_metrics: dict[str, Any],
-        projected_metrics: dict[str, Any],
+        current_metrics: dict[str, Any],
         target_slice: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         target_load = target_slice["load"] if target_slice else 0
@@ -117,22 +116,22 @@ class AgentDecisionService:
             },
             {
                 "label": "UPF headroom",
-                "value": f"{observed_metrics.get('upfCpuPercent', 0)}% CPU across {observed_metrics.get('upfPodCount', 1)} pod(s)",
+                "value": f"{observed_metrics.get('upfCpuPercent', 0)}% CPU across {observed_metrics.get('upfPodCount', 0)} pod(s)",
                 "severity": self.severity_for_threshold(observed_metrics.get("upfCpuPercent", 0), 60, 80),
                 "source": observed_metrics.get("dataSource", "unknown"),
             },
             {
-                "label": "Projected target slice",
-                "value": f"{cfg.slice_type} load {target_load}% with {projected_metrics.get('pduSessionCount', 0)} PDU session(s)",
+                "label": "Observed target slice",
+                "value": f"{cfg.slice_type} load {target_load}% with {current_metrics.get('pduSessionCount', 0)} PDU session(s)",
                 "severity": self.severity_for_threshold(target_load, 70, 85),
-                "source": "agent_projection",
+                "source": current_metrics.get("dataSource", "unknown"),
             },
         ]
 
     def build_hypotheses(self, event_type: str, cfg: EventConfig, observed_metrics: dict[str, Any], target_load: int) -> list[str]:
         hypotheses = [
             f"If {cfg.slice_type} is not pinned to SST={cfg.slice_sst} and 5QI={cfg.five_qi}, traffic may fall back to a weaker default policy.",
-            f"Projected {cfg.slice_type} load reaches {target_load}%, so the selected action should prioritize policy correctness before adding capacity.",
+            f"Observed {cfg.slice_type} load is {target_load}%, so the selected action should prioritize policy correctness before adding capacity.",
         ]
         if cfg.slice_type in ("URLLC", "V2X"):
             hypotheses.append("Latency-sensitive traffic is more likely to fail from QoS misclassification than from raw bandwidth shortage.")
@@ -160,7 +159,7 @@ class AgentDecisionService:
                 },
                 [
                     {"name": "Scale-only response", "reason": "More pods do not fix a misclassified URLLC/V2X flow."},
-                    {"name": "Best-effort traffic injection", "reason": "It would increase load without protecting the service class."},
+                    {"name": "Best-effort load handling", "reason": "It would react to load without protecting the service class."},
                 ],
             )
         if capacity_pressure:
@@ -191,14 +190,14 @@ class AgentDecisionService:
         self,
         cfg: EventConfig,
         observed_metrics: dict[str, Any],
-        projected_metrics: dict[str, Any],
+        current_metrics: dict[str, Any],
         target_load: int,
     ) -> list[dict[str, Any]]:
         return [
             {
                 "metric": "throughputMbps",
                 "before": observed_metrics.get("throughputMbps", 0),
-                "target": projected_metrics.get("throughputMbps", 0),
+                "target": current_metrics.get("throughputMbps", 0),
                 "status": "pending",
                 "passCondition": "actual throughput reaches the scenario profile without packet collapse",
             },
@@ -242,4 +241,3 @@ class AgentDecisionService:
         if slice_type == "mMTC":
             return 120
         return 50
-

@@ -37,7 +37,5 @@ Return a JSON object:
       "status": "pending"
     }}
   ],
-  "expected_outcome": "<what will improve>",
-  "score": <0-100>
+  "expected_outcome": "<what will improve>"
 }}"""
-

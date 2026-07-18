@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import time
+import os
 import urllib.parse
 import urllib.request
 from typing import Any
 
-from constants import DataSource
+from constants import DataSource, EvidenceLevel
 from slice_catalog import SliceCatalog
 from time_utils import TimeUtils
 
@@ -14,6 +14,7 @@ from time_utils import TimeUtils
 class PrometheusMetricsService:
     def __init__(self, prometheus_url: str) -> None:
         self.prometheus_url = prometheus_url
+        self.query_timeout = float(os.environ.get("PROMETHEUS_QUERY_TIMEOUT_SECONDS", "0.8"))
 
     def query(self, promql: str) -> float | None:
         if not self.prometheus_url:
@@ -21,7 +22,7 @@ class PrometheusMetricsService:
         query = urllib.parse.urlencode({"query": promql})
         url = f"{self.prometheus_url}/api/v1/query?{query}"
         try:
-            with urllib.request.urlopen(url, timeout=3) as res:
+            with urllib.request.urlopen(url, timeout=self.query_timeout) as res:
                 data = json.loads(res.read().decode("utf-8") or "{}")
                 results = data.get("data", {}).get("result", [])
                 if results:
@@ -37,17 +38,18 @@ class PrometheusMetricsService:
                 return value
         return None
 
-    def default_metrics(self) -> dict[str, Any]:
+    def unavailable_metrics(self) -> dict[str, Any]:
         return {
-            "upfCpuPercent": 18.5,
-            "upfPodCount": 1,
-            "amfPodCount": 1,
+            "upfCpuPercent": 0.0,
+            "upfPodCount": 0,
+            "amfPodCount": 0,
             "gtpPacketsPerSec": 0,
             "pduSessionCount": 0,
-            "latencyMs": 8.0,
-            "throughputMbps": 100.0,
+            "latencyMs": 0.0,
+            "throughputMbps": 0.0,
             "timestamp": TimeUtils.epoch_millis(),
-            "dataSource": DataSource.SIMULATED.value,
+            "dataSource": DataSource.UNAVAILABLE.value,
+            "evidenceLevel": EvidenceLevel.FALLBACK.value,
         }
 
     def get_real_metrics(self) -> dict[str, Any] | None:
@@ -71,10 +73,12 @@ class PrometheusMetricsService:
 
         uplink_bytes = uplink_bytes or 0.0
         downlink_bytes = downlink_bytes or 0.0
+        upf_pods = self.first_value('count(kube_pod_status_phase{namespace="free5gc",pod=~".*upf.*",phase="Running"})')
+        amf_pods = self.first_value('count(kube_pod_status_phase{namespace="free5gc",pod=~".*amf.*",phase="Running"})')
         return {
             "upfCpuPercent": round(upf_cpu or 0.0, 1),
-            "upfPodCount": int(self.first_value('count(kube_pod_status_phase{namespace="free5gc",pod=~".*upf.*",phase="Running"})') or 1),
-            "amfPodCount": int(self.first_value('count(kube_pod_status_phase{namespace="free5gc",pod=~".*amf.*",phase="Running"})') or 1),
+            "upfPodCount": int(upf_pods or 0),
+            "amfPodCount": int(amf_pods or 0),
             "amfCpuPercent": round(amf_cpu or 0.0, 1),
             "registeredUeCount": int(registered_ues or 0),
             "gtpPacketsPerSec": int(gtp_packets or 0),
@@ -85,22 +89,26 @@ class PrometheusMetricsService:
             "downlinkMbps": round(downlink_bytes * 8 / 1_000_000, 2),
             "timestamp": TimeUtils.epoch_millis(),
             "dataSource": DataSource.PROMETHEUS.value,
+            "evidenceLevel": EvidenceLevel.MEASURED.value,
         }
 
     def current_metrics(self) -> dict[str, Any]:
-        return self.get_real_metrics() or self.default_metrics()
+        return self.get_real_metrics() or self.unavailable_metrics()
 
-    def estimated_from_free5gc(self, started: float, event_subscribers: list[dict[str, Any]], registered_ues: list[dict[str, Any]]) -> dict[str, Any]:
-        metrics = self.default_metrics()
+    def metrics_from_free5gc(self, registered_ues: list[dict[str, Any]]) -> dict[str, Any]:
+        metrics = self.unavailable_metrics()
+        pdu_sessions = 0
+        for ue in registered_ues:
+            sessions = ue.get("PduSessions") or ue.get("pduSessions") or []
+            if isinstance(sessions, list):
+                pdu_sessions += len(sessions)
         metrics.update(
             {
-                "pduSessionCount": len(registered_ues),
+                "pduSessionCount": pdu_sessions,
                 "registeredUeCount": len(registered_ues),
-                "throughputMbps": round(len(event_subscribers) * 10, 1),
-                "gtpPacketsPerSec": len(event_subscribers) * 20,
-                "latencyMs": round((time.time() - started) * 1000, 1),
                 "timestamp": TimeUtils.epoch_millis(),
-                "dataSource": DataSource.ESTIMATED.value,
+                "dataSource": DataSource.FREE5GC.value,
+                "evidenceLevel": EvidenceLevel.ESTIMATED.value,
             }
         )
         return metrics
@@ -119,4 +127,3 @@ class PrometheusMetricsService:
             for sst in raw
         }
         return SliceCatalog.slices_from_prometheus(raw, sessions)
-

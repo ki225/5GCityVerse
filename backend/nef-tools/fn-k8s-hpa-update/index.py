@@ -1,6 +1,6 @@
 """
 K8s HPA Update Tool Lambda  (fn-k8s-hpa-update)
-─────────────────────────────────────────────────
+
 Adjusts the desired replica count for free5GC components
 by patching the HorizontalPodAutoscaler min/max replicas.
 Uses the Kubernetes Python client inside the VPC.
@@ -25,7 +25,6 @@ HPA_NAMES = {
 def lambda_handler(event: dict, _context) -> dict:
     params    = _extract_params(event)
     component = params.get('component', 'UPF').upper()
-    target_replicas = int(params.get('target_replicas', 2))
 
     if component not in HPA_NAMES:
         result = {'success': False, 'error': f'Unknown component: {component}'}
@@ -44,6 +43,28 @@ def lambda_handler(event: dict, _context) -> dict:
     hpa_name    = HPA_NAMES[component]
 
     try:
+        current_hpa = autoscaling.read_namespaced_horizontal_pod_autoscaler(
+            name=hpa_name,
+            namespace=NAMESPACE,
+        )
+        current_status = {
+            'min_replicas':     current_hpa.spec.min_replicas,
+            'max_replicas':     current_hpa.spec.max_replicas,
+            'current_replicas': current_hpa.status.current_replicas,
+            'desired_replicas': current_hpa.status.desired_replicas,
+        }
+        if 'target_replicas' not in params:
+            result = {
+                'success':   False,
+                'component': component,
+                'hpa_name':  hpa_name,
+                'namespace': NAMESPACE,
+                'error':     'target_replicas is required; no default scaling target is applied',
+                'current':   current_status,
+            }
+            return _bedrock_response(event, result)
+
+        target_replicas = int(params['target_replicas'])
         # Patch min/max replicas on the HPA
         patch = {
             'spec': {
@@ -62,6 +83,7 @@ def lambda_handler(event: dict, _context) -> dict:
             'target_replicas': target_replicas,
             'hpa_name':        hpa_name,
             'namespace':       NAMESPACE,
+            'previous':        current_status,
             'timestamp':       datetime.now(timezone.utc).isoformat(),
         }
     except k8s_client.ApiException as e:

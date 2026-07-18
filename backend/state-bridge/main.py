@@ -1,6 +1,6 @@
 """
 State Bridge
-────────────
+
 Watches the free5GC namespace in EKS for real Pod events,
 then pushes them to all connected WebSocket clients via
 API Gateway Management API.
@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 import boto3
 from kubernetes import client as k8s_client, config as k8s_config, watch as k8s_watch
 
-# ─── Config ───────────────────────────────────────────────────────────────────
+# Config
 NAMESPACE       = os.environ.get('FREE5GC_NAMESPACE', 'free5gc')
 DYNAMODB_TABLE  = os.environ['DYNAMODB_TABLE']
 APIGW_ENDPOINT  = os.environ['APIGW_WS_ENDPOINT']
@@ -33,7 +33,7 @@ METRICS_INTERVAL = int(os.environ.get('METRICS_INTERVAL_SEC', '5'))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('state-bridge')
 
-# ─── AWS clients ──────────────────────────────────────────────────────────────
+# AWS clients
 dynamodb  = boto3.resource('dynamodb')
 apigw_mgmt = boto3.client('apigatewaymanagementapi', endpoint_url=APIGW_ENDPOINT)
 
@@ -47,18 +47,23 @@ COMPONENT_MAP = {
     'nrf':  'NRF',
     'udr':  'UDR',
     'ausf': 'AUSF',
+    'ueransim': 'UERANSIM',
+    'gnb': 'UERANSIM',
+    'ue': 'UERANSIM',
+    'iperf3': 'IPERF3',
 }
 
 
-def extract_component(pod_name: str) -> str:
-    name_lower = pod_name.lower()
+def extract_component(pod_name: str, labels: dict | None = None) -> str:
+    label_text = ' '.join(str(value).lower() for value in (labels or {}).values())
+    name_lower = f'{pod_name.lower()} {label_text}'
     for prefix, component in COMPONENT_MAP.items():
-        if name_lower.startswith(prefix):
+        if prefix in name_lower:
             return component
     return 'UNKNOWN'
 
 
-# ─── Broadcast ────────────────────────────────────────────────────────────────
+# Broadcast
 def broadcast(message: dict) -> None:
     table       = dynamodb.Table(DYNAMODB_TABLE)
     connections = table.query(
@@ -79,7 +84,7 @@ def broadcast(message: dict) -> None:
             log.warning('Failed to push to %s: %s', connection_id, e)
 
 
-# ─── Pod Watcher ──────────────────────────────────────────────────────────────
+# Pod watcher
 def watch_pods() -> None:
     """Infinite loop watching free5GC pod events."""
     log.info('Starting pod watcher — namespace=%s', NAMESPACE)
@@ -94,7 +99,7 @@ def watch_pods() -> None:
                 name  = pod.metadata.name
                 phase = pod.status.phase or 'Unknown'
 
-                component = extract_component(name)
+                component = extract_component(name, pod.metadata.labels or {})
                 msg = {
                     'type': 'pod_event',
                     'payload': {
@@ -114,11 +119,11 @@ def watch_pods() -> None:
             time.sleep(5)
 
 
-# ─── Metrics Loop ─────────────────────────────────────────────────────────────
+# Metrics loop
 PROM_QUERIES = {
     'upf_cpu':         'avg(rate(container_cpu_usage_seconds_total{container="upf"}[1m])) * 100',
-    'upf_pods':        'count(kube_pod_status_phase{namespace="free5gc",pod=~"upf.*",phase="Running"})',
-    'amf_pods':        'count(kube_pod_status_phase{namespace="free5gc",pod=~"amf.*",phase="Running"})',
+    'upf_pods':        'count(kube_pod_status_phase{namespace="free5gc",pod=~".*upf.*",phase="Running"})',
+    'amf_pods':        'count(kube_pod_status_phase{namespace="free5gc",pod=~".*amf.*",phase="Running"})',
     'pdu_sessions':    'sum(free5gc_smf_pdu_session_count)',
     'gtp_pps':         'sum(rate(gtp5g_packet_count[30s]))',
     'latency_ms':      'avg(free5gc_upf_packet_latency_ms)',
@@ -151,13 +156,14 @@ def metrics_loop() -> None:
                 'type': 'metrics_update',
                 'payload': {
                     'upfCpuPercent':    round(raw.get('upf_cpu', 0.0), 1),
-                    'upfPodCount':      int(raw.get('upf_pods', 1)),
-                    'amfPodCount':      int(raw.get('amf_pods', 1)),
+                    'upfPodCount':      int(raw.get('upf_pods', 0)),
+                    'amfPodCount':      int(raw.get('amf_pods', 0)),
                     'gtpPacketsPerSec': int(raw.get('gtp_pps', 0)),
                     'pduSessionCount':  int(raw.get('pdu_sessions', 0)),
                     'latencyMs':        round(raw.get('latency_ms', 8.0), 1),
                     'throughputMbps':   round(raw.get('throughput_mbps', 0.0), 1),
                     'timestamp':        int(time.time() * 1000),
+                    'dataSource':       'prometheus',
                 }
             }
             broadcast(msg)
@@ -166,7 +172,7 @@ def metrics_loop() -> None:
         time.sleep(METRICS_INTERVAL)
 
 
-# ─── Entry ────────────────────────────────────────────────────────────────────
+# Entry
 if __name__ == '__main__':
     # Load k8s config (in-cluster when running in ECS with IRSA / node role)
     try:

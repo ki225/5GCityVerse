@@ -12,6 +12,7 @@ class WebSocketConnectionService:
     def __init__(self, table: Any, apigw: Any) -> None:
         self.table = table
         self.apigw = apigw
+        self._connections_cache: list[str] | None = None
 
     def connect(self, connection_id: str) -> dict[str, int]:
         self.table.put_item(
@@ -37,17 +38,27 @@ class WebSocketConnectionService:
             print(f"WebSocket message ignored: {exc}")
         return {"statusCode": 200}
 
-    def broadcast(self, message: dict[str, Any]) -> None:
+    def _get_connections(self) -> list[str]:
+        if self._connections_cache is not None:
+            return self._connections_cache
         response = self.table.query(
             KeyConditionExpression="pk = :pk",
             ExpressionAttributeValues={":pk": DynamoKeys.WS_CONNECTION.value},
         )
-        for conn in response.get("Items", []):
-            connection_id = conn["sk"]
+        self._connections_cache = [conn["sk"] for conn in response.get("Items", [])]
+        return self._connections_cache
+
+    def invalidate_connections_cache(self) -> None:
+        self._connections_cache = None
+
+    def broadcast(self, message: dict[str, Any]) -> None:
+        for connection_id in list(self._get_connections()):
             try:
                 self.post(connection_id, message)
             except self.apigw.exceptions.GoneException:
                 self.table.delete_item(Key={"pk": DynamoKeys.WS_CONNECTION.value, "sk": connection_id})
+                if self._connections_cache is not None and connection_id in self._connections_cache:
+                    self._connections_cache.remove(connection_id)
             except Exception as exc:
                 print(f"Failed to broadcast to {connection_id}: {exc}")
 

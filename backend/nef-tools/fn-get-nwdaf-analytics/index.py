@@ -1,6 +1,6 @@
 """
 Network Analytics Tool Lambda  (fn-get-nwdaf-analytics)
-────────────────────────────────────────────────────────
+
 Called by Bedrock Supervisor Agent to get current network state.
 Queries Prometheus (via HTTP) for free5GC metrics.
 In Phase 3+, also queries NWDAF Analytics API.
@@ -21,22 +21,22 @@ def lambda_handler(event: dict, _context) -> dict:
 
     result = {
         'timestamp':          datetime.now(timezone.utc).isoformat(),
-        'upf_cpu_percent':    metrics.get('upf_cpu',  20.0),
-        'upf_pod_count':      int(metrics.get('upf_pods', 1)),
-        'amf_pod_count':      int(metrics.get('amf_pods', 1)),
+        'upf_cpu_percent':    metrics.get('upf_cpu',  0.0),
+        'upf_pod_count':      int(metrics.get('upf_pods', 0)),
+        'amf_pod_count':      int(metrics.get('amf_pods', 0)),
         'pdu_session_count':  int(metrics.get('pdu_sessions', 0)),
         'gtp_packets_per_sec': int(metrics.get('gtp_pps', 0)),
-        'latency_ms':         metrics.get('latency_ms', 8.0),
-        'throughput_mbps':    metrics.get('throughput_mbps', 100.0),
+        'latency_ms':         metrics.get('latency_ms', 0.0),
+        'throughput_mbps':    metrics.get('throughput_mbps', 0.0),
         'slice_loads':        slices,
-        'hpa_enabled':        True,
+        'hpa_enabled':        bool(metrics.get('upf_pods') is not None),
         'scale_recommendation': _recommend_scale(metrics),
     }
 
     return _bedrock_response(event, result)
 
 
-# ─── Prometheus queries ───────────────────────────────────────────────────────
+# Prometheus queries
 _QUERIES = {
     'upf_cpu':        'avg(rate(container_cpu_usage_seconds_total{container="upf"}[1m])) * 100',
     'upf_pods':       'count(kube_pod_status_phase{namespace="free5gc",pod=~"upf.*",phase="Running"})',
@@ -66,8 +66,8 @@ def _query_prometheus() -> dict:
 
 def _compute_slice_loads(metrics: dict) -> list:
     """Estimate per-slice load from total throughput / session count."""
-    total_mbps   = metrics.get('throughput_mbps', 100.0)
-    total_sess   = max(metrics.get('pdu_sessions', 1), 1)
+    total_mbps   = metrics.get('throughput_mbps', 0.0)
+    total_sess   = max(metrics.get('pdu_sessions', 0), 0)
     return [
         {'sst': 1, 'type': 'eMBB',  'load': min(int(total_mbps * 0.6), 100), 'sessions': int(total_sess * 0.5)},
         {'sst': 2, 'type': 'URLLC', 'load': min(int(total_mbps * 0.1), 100), 'sessions': int(total_sess * 0.1)},
