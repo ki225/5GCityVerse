@@ -9,10 +9,10 @@ export default {
         mmtc: '#22c55e',      // green-500
         v2x: '#f97316',       // orange-500
         city: {
-          bg: '#0a0f1e',
-          panel: '#0f172a',
-          border: '#1e293b',
-          accent: '#38bdf8',
+          bg: '#eef3f8',
+          panel: '#ffffff',
+          border: '#dbe3ec',
+          accent: '#2563eb',
         },
       },
       animation: {

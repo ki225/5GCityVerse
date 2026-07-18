@@ -9,7 +9,7 @@ const H = 480
 
 export function CityMap() {
   const svgRef = useRef<SVGSVGElement>(null)
-  const { pods, packetFlows, activeEvent } = useAppStore()
+  const { pods, packetFlows } = useAppStore()
 
   // Map component → pod count for size scaling
   const podCount: Record<string, number> = {}
@@ -63,12 +63,12 @@ export function CityMap() {
     CITY_NODES.forEach((node) => {
       const g = svg.append('g').attr('transform', `translate(${node.x},${node.y})`)
 
-      const radius = nodeRadius(node, podCount)
+      const radius = nodeRadius(node)
       const fill = nodeFill(node)
       const stroke = nodeStroke(node, packetFlows)
 
       // Glow ring if UPF is scaling
-      const upfRunning = podCount['UPF'] ?? 1
+      const upfRunning = podCount['UPF'] ?? 0
       if (node.type === 'upf' && upfRunning > 1) {
         g.append('circle')
           .attr('class', 'city-node node-scaling')
@@ -124,7 +124,7 @@ export function CityMap() {
           .text('🧠')
       }
     })
-  }, [pods, packetFlows, activeEvent, podCount])
+  }, [pods, packetFlows, podCount])
 
   return (
     <div className="panel h-full flex flex-col">
@@ -150,14 +150,11 @@ export function CityMap() {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function nodeRadius(node: CityNode, podCount: Record<string, number>): number {
+function nodeRadius(node: CityNode): number {
   if (node.type === 'district') return 28
   if (node.type === 'gnb') return 16
   if (node.type === 'core') return 22
-  if (node.type === 'upf') {
-    const count = podCount['UPF'] ?? 1
-    return 18 + count * 4
-  }
+  if (node.type === 'upf') return 22
   return 18
 }
 
