@@ -20,11 +20,12 @@ FREE5GC_HELM_REF="${FREE5GC_HELM_REF:-0d0b4b392bbb1b099acb9a1b37c39e0647ff6d4c}"
 FREE5GC_VALUES="${FREE5GC_VALUES:-${ROOT_DIR}/k8s/free5gc-eks-values.yaml}"
 SLICE_DATA_PLANE_DIR="${SLICE_DATA_PLANE_DIR:-${ROOT_DIR}/k8s/slice-data-plane}"
 FREE5GC_HELM_TIMEOUT="${FREE5GC_HELM_TIMEOUT:-30m}"
-SMF_QER_IMAGE_DIGEST="${SMF_QER_IMAGE_DIGEST:-fe6a8583857c639beb7892c38c3ae58e41b9d6b559570c6a319624a7324f715d}"
+SMF_QER_IMAGE_DIGEST="${SMF_QER_IMAGE_DIGEST:-d47063101e6ae2897ab1dd4455b3ebecd1a467bbbce561acb6a56dff02143057}"
 SMF_QER_SECRET_NAME="${SMF_QER_SECRET_NAME:-smf-qer-actuator-token}"
 UERANSIM_RELEASE="${UERANSIM_RELEASE:-ueransim-city}"
 UERANSIM_VALUES="${UERANSIM_VALUES:-${ROOT_DIR}/k8s/ueransim-eks-values.yaml}"
 UERANSIM_HELM_TIMEOUT="${UERANSIM_HELM_TIMEOUT:-10m}"
+UERANSIM_IMAGE_DIGEST="${UERANSIM_IMAGE_DIGEST:-sha256:58909d22fe2b1d24893fe26eb9502dac1056c85e4135fa87902bf3a1d1eb3e0b}"
 METRICS_SERVER_MANIFEST_URL="${METRICS_SERVER_MANIFEST_URL:-https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml}"
 METRICS_SERVER_MANIFEST_SHA256="${METRICS_SERVER_MANIFEST_SHA256:-f103539a54ed72efe66616afc74a8bfaed651703cb3918797599046af5617441}"
 
@@ -43,6 +44,61 @@ require_cmd() {
   if [[ "$missing" -ne 0 ]]; then
     exit 1
   fi
+}
+
+ensure_ecr_image_digest() {
+  local repository_url="$1"
+  local expected_digest="$2"
+  local dockerfile="$3"
+  local build_context="$4"
+  local repository_name image_id restore_tag push_ref actual_digest
+
+  [[ "$expected_digest" == sha256:* ]] || expected_digest="sha256:${expected_digest}"
+  if [[ ! "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Invalid reviewed image digest: ${expected_digest}" >&2
+    return 1
+  fi
+  repository_name="${repository_url##*/}"
+
+  actual_digest="$(aws_cli ecr describe-images \
+    --repository-name "$repository_name" \
+    --image-ids "imageDigest=${expected_digest}" \
+    --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+  if [[ "$actual_digest" == "$expected_digest" ]]; then
+    log "Verified reviewed ECR image ${repository_name}@${expected_digest}"
+    return 0
+  fi
+
+  log "ECR repository ${repository_name} is missing ${expected_digest}; restoring the reviewed image"
+  aws_cli ecr get-login-password |
+    docker login --username AWS --password-stdin "${repository_url%%/*}" >/dev/null
+
+  image_id="$(docker image ls --digests --no-trunc \
+    --format '{{.Digest}} {{.ID}}' | awk -v digest="$expected_digest" '$1 == digest { print $2; exit }')"
+  restore_tag="restore-${expected_digest#sha256:}"
+  restore_tag="${restore_tag:0:20}"
+  push_ref="${repository_url}:${restore_tag}"
+  if [[ -n "$image_id" ]]; then
+    log "Reusing local image ${image_id} for ${repository_name}@${expected_digest}"
+    docker tag "$image_id" "$push_ref"
+  else
+    log "No local copy of ${expected_digest}; rebuilding from pinned ${dockerfile}"
+    docker build --provenance=false -f "$dockerfile" -t "$push_ref" "$build_context"
+  fi
+  docker push "$push_ref"
+
+  actual_digest="$(aws_cli ecr describe-images \
+    --repository-name "$repository_name" \
+    --image-ids "imageTag=${restore_tag}" \
+    --query 'imageDetails[0].imageDigest' --output text)"
+  if [[ "$actual_digest" != "$expected_digest" ]]; then
+    echo "Restored image digest mismatch for ${repository_name}." >&2
+    echo "  expected: ${expected_digest}" >&2
+    echo "  actual:   ${actual_digest:-<missing>}" >&2
+    echo "Refusing to deploy an unreviewed image; update the reviewed digest explicitly." >&2
+    return 1
+  fi
+  log "Restored and verified ${repository_name}@${actual_digest}"
 }
 
 is_wsl() {
@@ -269,6 +325,9 @@ EOF
 
 update_kubeconfig() {
   local expected_endpoint
+  local api_endpoint
+  local tls_server_name
+  local cluster_entry
   local current_endpoint
   local kube_context="${EKS_KUBECONFIG_CONTEXT:-$EKS_CLUSTER_NAME}"
 
@@ -281,17 +340,27 @@ update_kubeconfig() {
     --user-alias "$kube_context"
   kubectl config use-context "$kube_context" >/dev/null
 
+  api_endpoint="${EKS_API_TUNNEL_ENDPOINT:-$expected_endpoint}"
+  if [[ -n "${EKS_API_TUNNEL_ENDPOINT:-}" ]]; then
+    tls_server_name="${EKS_API_TLS_SERVER_NAME:-${expected_endpoint#https://}}"
+    cluster_entry="$(kubectl config view --minify -o jsonpath='{.clusters[0].name}')"
+    kubectl config set-cluster "$cluster_entry" \
+      --server="$api_endpoint" \
+      --tls-server-name="$tls_server_name" >/dev/null
+    log "Routing Kubernetes API access through ${api_endpoint} with TLS SNI ${tls_server_name}"
+  fi
+
   current_endpoint="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
-  if [[ "$current_endpoint" != "$expected_endpoint" ]]; then
+  if [[ "$current_endpoint" != "$api_endpoint" ]]; then
     echo "Kubeconfig endpoint mismatch after update." >&2
-    echo "  expected: ${expected_endpoint}" >&2
+    echo "  expected: ${api_endpoint}" >&2
     echo "  current:  ${current_endpoint:-<empty>}" >&2
     return 1
   fi
 
-  check_kubernetes_api "$expected_endpoint"
+  check_kubernetes_api "$api_endpoint"
 
-  log "Kubeconfig is using the current EKS endpoint: ${expected_endpoint}"
+  log "Kubeconfig is using the current EKS endpoint: ${api_endpoint}"
 }
 
 sync_free5gc_chart() {
@@ -356,6 +425,12 @@ install_multus() {
 install_gtp5g() {
   kubectl_apply "$ROOT_DIR/k8s/gtp5g-installer.yaml"
   kubectl_rollout_status kube-system daemonset/gtp5g-installer 600s
+}
+
+install_gtp5g_metrics_exporter() {
+  kubectl_create_namespace_if_missing "$FREE5GC_NAMESPACE"
+  kubectl_apply "$ROOT_DIR/k8s/gtp5g-metrics-exporter.yaml"
+  kubectl_rollout_status "$FREE5GC_NAMESPACE" daemonset/gtp5g-metrics-exporter 300s
 }
 
 install_metrics_server() {
@@ -862,7 +937,7 @@ webui_internal_nlb_ready() {
 service_load_balancer_hostname() {
   local service_name="$1"
   local hostname
-  hostname="$(kubectl -n "$FREE5GC_NAMESPACE" get service "$service_name" \
+  hostname="$(kubectl --request-timeout=15s -n "$FREE5GC_NAMESPACE" get service "$service_name" \
     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
 
   # Keep hostname syntax strict so an IP, cluster-local name, or arbitrary
@@ -878,14 +953,14 @@ internal_nlb_ready() {
   local service_name="$1"
   local service_type scheme_annotation legacy_internal hostname actual_scheme endpoint
 
-  service_type="$(kubectl -n "$FREE5GC_NAMESPACE" get service "$service_name" \
+  service_type="$(kubectl --request-timeout=15s -n "$FREE5GC_NAMESPACE" get service "$service_name" \
     -o jsonpath='{.spec.type}' 2>/dev/null || true)"
-  scheme_annotation="$(kubectl -n "$FREE5GC_NAMESPACE" get service "$service_name" \
+  scheme_annotation="$(kubectl --request-timeout=15s -n "$FREE5GC_NAMESPACE" get service "$service_name" \
     -o jsonpath='{.metadata.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme}' 2>/dev/null || true)"
-  legacy_internal="$(kubectl -n "$FREE5GC_NAMESPACE" get service "$service_name" \
+  legacy_internal="$(kubectl --request-timeout=15s -n "$FREE5GC_NAMESPACE" get service "$service_name" \
     -o jsonpath='{.metadata.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-internal}' 2>/dev/null || true)"
   hostname="$(service_load_balancer_hostname "$service_name")" || return 1
-  endpoint="$(kubectl -n "$FREE5GC_NAMESPACE" get endpoints "$service_name" \
+  endpoint="$(kubectl --request-timeout=15s -n "$FREE5GC_NAMESPACE" get endpoints "$service_name" \
     -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)"
 
   [[ "$service_type" == "LoadBalancer" ]] || return 1
@@ -913,6 +988,7 @@ install_ueransim() {
   recover_ueransim_helm_release
   local resident_baseline_overlay="$ROOT_DIR/k8s/helm-overlays/ueransim/ue-deployment.yaml"
   local resident_baseline_target="$FREE5GC_HELM_DIR/charts/ueransim/templates/ue/ue-deployment.yaml"
+  local ueransim_image_repository
   if [[ ! -f "$resident_baseline_overlay" || ! -f "$resident_baseline_target" ]]; then
     echo "Resident UE baseline Helm overlay or upstream target is missing." >&2
     echo "overlay=$resident_baseline_overlay target=$resident_baseline_target" >&2
@@ -921,9 +997,14 @@ install_ueransim() {
   # The upstream chart has no extraContainers value. Keep the repository-owned
   # overlay explicit instead of mutating the live Deployment after Helm runs.
   cp "$resident_baseline_overlay" "$resident_baseline_target"
+  ueransim_image_repository="${UERANSIM_IMAGE_REPOSITORY:-$(tf_output ueransim_ecr_repository_url)}"
   helm upgrade --install "$UERANSIM_RELEASE" "$FREE5GC_HELM_DIR/charts/ueransim" \
     --namespace "$FREE5GC_NAMESPACE" \
     -f "$UERANSIM_VALUES" \
+    --set-string "gnb.image.name=${ueransim_image_repository}@sha256" \
+    --set-string "gnb.image.tag=${UERANSIM_IMAGE_DIGEST#sha256:}" \
+    --set-string "ue.image.name=${ueransim_image_repository}@sha256" \
+    --set-string "ue.image.tag=${UERANSIM_IMAGE_DIGEST#sha256:}" \
     --force \
     --timeout "$UERANSIM_HELM_TIMEOUT" \
     --wait || {

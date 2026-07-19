@@ -19,6 +19,7 @@ import urllib.request
 
 
 API_URL = os.environ.get("API_URL", "").rstrip("/")
+API_TOKEN = os.environ.get("CITYVERSE_API_TOKEN", "").strip()
 EXPECTED_SESSIONS = int(os.environ.get("EXPECTED_BASELINE_SESSIONS", "1"))
 ATTEMPTS = int(os.environ.get("BASELINE_VERIFY_ATTEMPTS", "18"))
 DELAY_SECONDS = int(os.environ.get("BASELINE_VERIFY_DELAY_SECONDS", "20"))
@@ -88,7 +89,10 @@ def is_resident_tun_sample(metrics: dict) -> bool:
 
 
 def fetch_status() -> dict:
-    req = urllib.request.Request(f"{API_URL}/free5gc/status", method="GET")
+    headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
+    req = urllib.request.Request(
+        f"{API_URL}/free5gc/status", headers=headers, method="GET"
+    )
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as res:
         data = json.loads(res.read().decode("utf-8") or "{}")
     if isinstance(data.get("body"), str):

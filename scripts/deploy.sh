@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
-require_cmd aws curl terraform kubectl helm git npm python3 sha256sum
+require_cmd aws curl terraform kubectl helm git npm python3 sha256sum docker
 export AWS_PROFILE AWS_REGION
 aws sts --profile "$AWS_PROFILE" --region "$AWS_REGION" get-caller-identity --no-cli-pager >/dev/null || {
   echo "AWS STS preflight failed for profile ${AWS_PROFILE} in ${AWS_REGION}; refusing to plan with fallback credentials." >&2
@@ -203,6 +203,19 @@ if [[ -n "$CURRENT_NEF_BASE_URL" ]]; then
 fi
 terraform_reviewed_apply "$TF_DIR" initial "${TF_NETWORK_ARGS[@]}" "${INITIAL_ENDPOINT_ARGS[@]}"
 
+# ECR repositories are destroyed with the environment. Re-establish the
+# reviewed immutable images from this deployment's Terraform outputs before
+# any Kubernetes workload or Lambda environment can reference their digests.
+SMF_QER_IMAGE_REPOSITORY="$(tf_output smf_qer_actuator_ecr_repository_url)"
+UERANSIM_IMAGE_REPOSITORY="$(tf_output ueransim_ecr_repository_url)"
+export SMF_QER_IMAGE_REPOSITORY UERANSIM_IMAGE_REPOSITORY
+ensure_ecr_image_digest \
+  "$SMF_QER_IMAGE_REPOSITORY" "$SMF_QER_IMAGE_DIGEST" \
+  "$ROOT_DIR/custom-smf/Dockerfile" "$ROOT_DIR/custom-smf"
+ensure_ecr_image_digest \
+  "$UERANSIM_IMAGE_REPOSITORY" "$UERANSIM_IMAGE_DIGEST" \
+  "$ROOT_DIR/custom-ueransim/Dockerfile" "$ROOT_DIR/custom-ueransim"
+
 if [[ "${TF_VAR_api_auth_enabled:-true}" == "true" ]]; then
   API_SECRET_ARN="$(tf_output api_access_secret_arn)"
   python3 -c 'import json,os; print(json.dumps({"token": os.environ["CITYVERSE_API_TOKEN"]}))' |
@@ -226,6 +239,7 @@ sync_free5gc_chart
 install_multus
 install_gtp5g
 install_free5gc
+install_gtp5g_metrics_exporter
 install_real_simulation_assets
 
 FREE5GC_WEBUI_URL="$(free5gc_webui_url)"
@@ -235,6 +249,16 @@ if [[ -z "$FREE5GC_WEBUI_URL" ]]; then
 fi
 
 log "Rotating and verifying the free5GC WebUI administrator password"
+WEBUI_SECRET_ARN="$(tf_output free5gc_webui_secret_arn)"
+if [[ -z "${FREE5GC_WEBUI_CURRENT_PASSWORD:-}" ]]; then
+  STORED_WEBUI_SECRET="$(aws_cli secretsmanager get-secret-value \
+    --secret-id "$WEBUI_SECRET_ARN" --query SecretString --output text 2>/dev/null || true)"
+  if [[ -n "$STORED_WEBUI_SECRET" && "$STORED_WEBUI_SECRET" != "None" ]]; then
+    FREE5GC_WEBUI_CURRENT_PASSWORD="$(STORED_WEBUI_SECRET="$STORED_WEBUI_SECRET" python3 -c \
+      'import json, os; print(json.loads(os.environ["STORED_WEBUI_SECRET"]).get("password", ""))')"
+    export FREE5GC_WEBUI_CURRENT_PASSWORD
+  fi
+fi
 (
   ROTATE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
   ROTATE_FORWARD_LOG="$(mktemp)"
@@ -247,7 +271,6 @@ log "Rotating and verifying the free5GC WebUI administrator password"
   FREE5GC_WEBUI_CURRENT_PASSWORD="${FREE5GC_WEBUI_CURRENT_PASSWORD:-free5gc}" \
     python3 "$ROOT_DIR/scripts/rotate-free5gc-webui-password.py"
 )
-WEBUI_SECRET_ARN="$(tf_output free5gc_webui_secret_arn)"
 python3 -c 'import json,os; print(json.dumps({"username": os.environ.get("FREE5GC_WEBUI_USERNAME", "admin"), "password": os.environ["FREE5GC_WEBUI_PASSWORD"]}))' |
   aws_cli secretsmanager put-secret-value --secret-id "$WEBUI_SECRET_ARN" --secret-string file:///dev/stdin >/dev/null
 
@@ -344,10 +367,15 @@ kubectl -n "$FREE5GC_NAMESPACE" rollout status deployment/free5gc-free5gc-smf-sm
 kubectl -n "$FREE5GC_NAMESPACE" rollout restart deployment/ueransim-city-gnb
 sleep 3
 kubectl -n "$FREE5GC_NAMESPACE" rollout status deployment/ueransim-city-gnb --timeout=180s
-kubectl -n "$FREE5GC_NAMESPACE" rollout restart deployment/ueransim-city-ue deployment/ueransim-city-mmtc
-sleep 3
-kubectl -n "$FREE5GC_NAMESPACE" rollout status deployment/ueransim-city-ue --timeout=180s
-kubectl -n "$FREE5GC_NAMESPACE" rollout status deployment/ueransim-city-mmtc --timeout=180s
+for ue_deployment in ueransim-city-ue ueransim-city-mmtc; do
+  if kubectl -n "$FREE5GC_NAMESPACE" get deployment "$ue_deployment" >/dev/null 2>&1; then
+    kubectl -n "$FREE5GC_NAMESPACE" rollout restart "deployment/${ue_deployment}"
+    sleep 3
+    kubectl -n "$FREE5GC_NAMESPACE" rollout status "deployment/${ue_deployment}" --timeout=180s
+  else
+    log "Skipping optional UE deployment ${ue_deployment}; it is created on demand by scenario reconciliation"
+  fi
+done
 kubectl -n "$FREE5GC_NAMESPACE" rollout restart deployment/iperf3-server
 sleep 3
 kubectl -n "$FREE5GC_NAMESPACE" rollout status deployment/iperf3-server --timeout=180s
@@ -359,11 +387,15 @@ frontend_npm_ci
   # Inline VITE_* env vars proved unreliable under WSL (2026-07-05: stale default
   # endpoints got baked into the bundle). Write .env.production.local so vite
   # picks the current endpoints up deterministically on every deploy.
-  printf 'VITE_API_URL=%s\nVITE_WS_URL=%s\n' "${API_URL%/}" "$WS_URL" > .env.production.local
-  VITE_API_URL="${API_URL%/}" VITE_WS_URL="$WS_URL" npm run build
+  printf 'VITE_API_URL=%s\nVITE_WS_URL=%s\nVITE_FREE5GC_WEBUI_URL=%s\n' "${API_URL%/}" "$WS_URL" "$FREE5GC_WEBUI_URL" > .env.production.local
+  VITE_API_URL="${API_URL%/}" VITE_WS_URL="$WS_URL" VITE_FREE5GC_WEBUI_URL="$FREE5GC_WEBUI_URL" npm run build
   BUILT_BUNDLE="$(ls dist/assets/index-*.js | head -1)"
   if ! grep -q "$(printf '%s' "${API_URL%/}" | sed 's#https://##;s#/.*##')" "$BUILT_BUNDLE"; then
     echo "Frontend bundle does not contain the live API endpoint; VITE env injection failed." >&2
+    exit 1
+  fi
+  if ! grep -q "$(printf '%s' "$FREE5GC_WEBUI_URL" | sed 's#https\?://##;s#/.*##')" "$BUILT_BUNDLE"; then
+    echo "Frontend bundle does not contain the free5GC WebUI endpoint; VITE env injection failed." >&2
     exit 1
   fi
 )
