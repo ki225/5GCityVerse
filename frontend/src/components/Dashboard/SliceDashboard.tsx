@@ -54,7 +54,7 @@ export function resolveAppliedAiAllocation(
 }
 
 export function isSliceStrategyLocked(orchestrationStage: string): boolean {
-  return orchestrationStage !== 'idle'
+  return !['idle', 'complete', 'blocked'].includes(orchestrationStage)
 }
 
 export function SliceDashboard() {
@@ -109,7 +109,7 @@ export function SliceDashboard() {
   }, [appliedAiAllocation.shares, effectiveSliceStrategy, text])
 
   return (
-    <div className="panel flex flex-col gap-4 max-h-[calc(100vh-2rem)] overflow-y-auto">
+    <div className="panel flex flex-col gap-4">
       <h2 className="text-sm font-bold text-slate-700 tracking-wider uppercase shrink-0">
         {text('5GC 核網儀表板', '5GC Dashboard')}
       </h2>
@@ -278,7 +278,7 @@ const EMPTY_EXPERIENCE: ScenarioExperienceMeasurement = { throughputMbps: 0, lat
 
 export interface CitizenUeExperienceMeasurement extends ScenarioExperienceMeasurement {
   packetLossPercent: number
-  source: 'ue-tun-probe'
+  source: 'ue-tun-probe' | 'resident-tun-iperf3'
 }
 
 const EMPTY_CITIZEN_UE_EXPERIENCE: CitizenUeExperienceMeasurement = {
@@ -310,7 +310,7 @@ export function measureCitizenUeExperience(metrics: NetworkMetrics | null): Citi
     latencyMs: Number.isFinite(probe.latencyMs) ? Number(probe.latencyMs) : 0,
     packetLossPercent: Number.isFinite(probe.packetLossPercent) ? Number(probe.packetLossPercent) : 0,
     observed: true,
-    source: 'ue-tun-probe',
+    source: probe.measurementSource === 'resident-tun-iperf3' ? 'resident-tun-iperf3' : 'ue-tun-probe',
   }
 }
 
@@ -459,7 +459,9 @@ function ExperienceOutcomes({
               {citizenCurrent.observed ? (
                 <div className="shrink-0 text-right">
                   <p className="font-bold text-blue-700">{formatExperienceMetric(citizenCurrent.throughputMbps)} Mbps</p>
-                  <p className="text-[10px] font-bold text-red-600">{formatExperienceMetric(citizenCurrent.latencyMs)} ms · {formatExperienceMetric(citizenCurrent.packetLossPercent)}% loss</p>
+                  {citizenCurrent.source === 'resident-tun-iperf3'
+                    ? <p className="text-[10px] font-semibold text-amber-700">{text('延遲／丟包探測中', 'Latency/loss probe pending')}</p>
+                    : <p className="text-[10px] font-bold text-red-600">{formatExperienceMetric(citizenCurrent.latencyMs)} ms · {formatExperienceMetric(citizenCurrent.packetLossPercent)}% loss</p>}
                 </div>
               ) : <span className="shrink-0 text-[10px] text-slate-400">{text('不以整體吞吐量代替 UE 體驗', 'Aggregate throughput is not used as UE experience')}</span>}
             </div>
@@ -577,6 +579,7 @@ function describeExperience(type: CityEventType, measurement: ScenarioExperience
 export function describeCitizenUeExperience(measurement: CitizenUeExperienceMeasurement, text: (zh: string, en: string) => string, pduSessionCount = 0, receivedPackets = 0) {
   if (!measurement.observed && pduSessionCount > 0) return { label: text('TUN bearer 已建立，品質探測啟動中', 'TUN bearer established; quality probe is starting'), tone: 'text-amber-700' }
   if (!measurement.observed) return { label: text('等待市民手機建立 TUN bearer', 'Waiting for the citizen phone TUN bearer'), tone: 'text-slate-500' }
+  if (measurement.source === 'resident-tun-iperf3') return { label: text('市民手機 TUN 流量已量測，延遲探測中', 'Citizen TUN traffic measured; latency probe pending'), tone: 'text-blue-700' }
   if (measurement.packetLossPercent >= 50) {
     return { label: text('一般市民連線中斷或嚴重不穩', 'Citizen connectivity is interrupted or severely unstable'), tone: 'text-red-600' }
   }

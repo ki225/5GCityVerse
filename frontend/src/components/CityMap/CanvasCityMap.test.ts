@@ -158,6 +158,16 @@ describe('EVENT_TARGET_NODE', () => {
     expect(TOPOLOGY_NODES.filter((node) => node.kind === 'ran').map((node) => node.id)).toEqual(['gnb1'])
   })
 
+  it('does not present a selected typhoon as the unselected medical scenario', () => {
+    expect(EVENT_TARGET_NODE.typhoon).toBe('disaster')
+    expect(EVENT_TARGET_NODE.medical).toBe('hospital')
+    expect(EVENT_TARGET_NODE.typhoon).not.toBe(EVENT_TARGET_NODE.medical)
+    expect(TOPOLOGY_NODES.find((node) => node.id === 'disaster')).toMatchObject({
+      label: 'Disaster Ops',
+      sublabel: 'URLLC storm response',
+    })
+  })
+
   it('presents the citizen phone as an eMBB endpoint, not an mMTC device', () => {
     const citizenPhone = TOPOLOGY_NODES.find((node) => node.id === 'residential')
     expect(citizenPhone).toMatchObject({

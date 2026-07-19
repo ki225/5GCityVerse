@@ -40,7 +40,8 @@ describe('isSliceStrategyLocked', () => {
     expect(isSliceStrategyLocked('queued')).toBe(true)
     expect(isSliceStrategyLocked('runtime_priming')).toBe(true)
     expect(isSliceStrategyLocked('planning')).toBe(true)
-    expect(isSliceStrategyLocked('complete')).toBe(true)
+    expect(isSliceStrategyLocked('complete')).toBe(false)
+    expect(isSliceStrategyLocked('blocked')).toBe(false)
   })
 })
 
@@ -123,6 +124,20 @@ describe('measureCitizenUeExperience', () => {
       observed: false,
       source: 'ue-tun-probe',
     })
+  })
+
+  it('accepts only the resident TUN-bound iperf sample as throughput-only citizen evidence', () => {
+    const measured = measureCitizenUeExperience({
+      ueTunProbe: {
+        ready: true,
+        interface: 'uesimtun0',
+        throughputMbps: 12,
+        measurementSource: 'resident-tun-iperf3',
+      },
+    } as NetworkMetrics)
+
+    expect(measured).toMatchObject({ throughputMbps: 12, observed: true, source: 'resident-tun-iperf3' })
+    expect(describeCitizenUeExperience(measured, (zh: string) => zh).label).toBe('市民手機 TUN 流量已量測，延遲探測中')
   })
 
   it('keeps low-rate UE probe evidence visible instead of rounding it to zero', () => {

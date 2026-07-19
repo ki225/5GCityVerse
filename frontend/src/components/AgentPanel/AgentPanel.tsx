@@ -49,7 +49,7 @@ export function AgentPanel() {
   }, [orchestrationStage])
 
   return (
-    <div className="panel flex flex-col gap-3 max-h-[calc(100vh-2rem)] overflow-y-auto">
+    <div className="panel flex flex-col gap-3">
       <div className="flex shrink-0 items-center justify-between gap-2">
         <h2 className="text-sm font-bold text-slate-700 tracking-wider uppercase">
           {text('AI Agent 決策中心', 'AI Agent Decision Center')}

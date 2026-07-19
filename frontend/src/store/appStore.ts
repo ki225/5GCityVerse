@@ -420,9 +420,19 @@ export const useAppStore = create<AppState>((set) => ({
 
   setWsConnected: (v) => set({ wsConnected: v }),
   setRuntimeBusy: (v) => set({ runtimeBusy: v }),
-  setSliceStrategy: (sliceStrategy) => set((state) =>
-    state.orchestrationStage === 'idle' ? { sliceStrategy } : state
-  ),
+  setSliceStrategy: (sliceStrategy) => set((state) => {
+    const roundStageActive = !['idle', 'complete', 'blocked'].includes(state.orchestrationStage)
+    const roundActive = roundStageActive
+      || state.isSimulating
+      || state.activeScenarios.length > 0
+      || state.isReportGenerating
+    if (roundActive) return state
+    return {
+      sliceStrategy,
+      submittedSliceStrategy: null,
+      orchestrationStage: 'idle',
+    }
+  }),
 
   reset: () =>
     set({

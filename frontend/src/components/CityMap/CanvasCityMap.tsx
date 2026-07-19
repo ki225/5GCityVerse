@@ -36,7 +36,7 @@ const SLICE_QI: Record<SliceType, number> = {
 export const EVENT_TARGET_NODE: Record<CityEventType, string> = {
   concert: 'mall',
   medical: 'hospital',
-  typhoon: 'hospital',
+  typhoon: 'disaster',
   iot_surge: 'factory',
   accident: 'highway',
 }
@@ -115,11 +115,12 @@ interface StaticLink {
 }
 
 export const TOPOLOGY_NODES: TopologyNode[] = [
-  { id: 'mall', label: 'Mall UEs', sublabel: 'eMBB AR media', x: 95, y: 165, w: 78, h: 48, kind: 'scenario', sliceTypes: ['eMBB'] },
-  { id: 'factory', label: 'Factory IoT', sublabel: 'mMTC sensors', x: 95, y: 265, w: 78, h: 48, kind: 'scenario', sliceTypes: ['mMTC', 'URLLC'] },
-  { id: 'hospital', label: 'Hospital', sublabel: 'URLLC medical', x: 95, y: 365, w: 78, h: 48, kind: 'scenario', sliceTypes: ['URLLC'] },
-  { id: 'residential', label: '市民手機', sublabel: 'eMBB phone', x: 95, y: 465, w: 78, h: 48, kind: 'scenario', sliceTypes: ['eMBB'] },
-  { id: 'highway', label: 'Highway V2X', sublabel: 'vehicle UEs', x: 95, y: 565, w: 78, h: 48, kind: 'scenario', sliceTypes: ['V2X'] },
+  { id: 'mall', label: 'Mall UEs', sublabel: 'eMBB AR media', x: 95, y: 125, w: 78, h: 48, kind: 'scenario', sliceTypes: ['eMBB'] },
+  { id: 'factory', label: 'Factory IoT', sublabel: 'mMTC sensors', x: 95, y: 215, w: 78, h: 48, kind: 'scenario', sliceTypes: ['mMTC', 'URLLC'] },
+  { id: 'disaster', label: 'Disaster Ops', sublabel: 'URLLC storm response', x: 95, y: 305, w: 78, h: 48, kind: 'scenario', sliceTypes: ['URLLC'] },
+  { id: 'hospital', label: 'Hospital', sublabel: 'URLLC medical', x: 95, y: 395, w: 78, h: 48, kind: 'scenario', sliceTypes: ['URLLC'] },
+  { id: 'residential', label: '市民手機', sublabel: 'eMBB phone', x: 95, y: 485, w: 78, h: 48, kind: 'scenario', sliceTypes: ['eMBB'] },
+  { id: 'highway', label: 'Highway V2X', sublabel: 'vehicle UEs', x: 95, y: 575, w: 78, h: 48, kind: 'scenario', sliceTypes: ['V2X'] },
 
   { id: 'gnb1', label: 'gNB', sublabel: 'single coverage cell', x: 265, y: 330, w: 82, h: 52, kind: 'ran' },
 
@@ -138,6 +139,7 @@ export const TOPOLOGY_NODES: TopologyNode[] = [
 
 const STATIC_LINKS: StaticLink[] = [
   { from: 'mall', to: 'gnb1', type: 'access' },
+  { from: 'disaster', to: 'gnb1', type: 'access' },
   { from: 'hospital', to: 'gnb1', type: 'access' },
   { from: 'residential', to: 'gnb1', type: 'access' },
   { from: 'factory', to: 'gnb1', type: 'access' },
@@ -172,6 +174,7 @@ const nodeById = Object.fromEntries(TOPOLOGY_NODES.map((node) => [node.id, node]
 // payload to that single topology node.
 const SCENARIO_SOURCE_GNB: Record<string, string> = {
   mall: 'gnb1',
+  disaster: 'gnb1',
   hospital: 'gnb1',
   residential: 'gnb1',
   factory: 'gnb1',
@@ -190,7 +193,7 @@ const SCENARIO_GNB: Record<string, string> = {
   'baseline-embb': SCENARIO_SOURCE_GNB.residential,
   concert: SCENARIO_SOURCE_GNB.mall,
   medical: SCENARIO_SOURCE_GNB.hospital,
-  typhoon: SCENARIO_SOURCE_GNB.hospital,
+  typhoon: SCENARIO_SOURCE_GNB.disaster,
   iot_surge: SCENARIO_SOURCE_GNB.factory,
   accident: SCENARIO_SOURCE_GNB.highway,
 }
@@ -936,7 +939,7 @@ function drawNode(
 function topologyIcon(node: TopologyNode): string {
   if (node.kind === 'ran') return '📡'
   const icons: Record<string, string> = {
-    mall: '📱', factory: '🏭', hospital: '🏥', residential: '👥', highway: '🚗', dn: '🌐',
+    mall: '📱', factory: '🏭', disaster: '🌀', hospital: '🏥', residential: '👥', highway: '🚗', dn: '🌐',
   }
   return icons[node.id] ?? ''
 }

@@ -102,6 +102,7 @@ export interface NetworkMetrics {
     latencyMs?: number
     packetLossPercent?: number
     receivedPackets?: number
+    measurementSource?: 'ue-tun-ping' | 'resident-tun-iperf3'
   }
   podComponents?: ComponentPods[]
   componentCpuPercent?: Record<string, number>

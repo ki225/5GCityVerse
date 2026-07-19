@@ -100,6 +100,24 @@ describe('beginAgentRound', () => {
     expect(useAppStore.getState().sliceStrategy).toBe('none')
     expect(useAppStore.getState().submittedSliceStrategy).toBeNull()
   })
+
+  it('allows choosing the next strategy after the round has no active scenarios', () => {
+    useAppStore.setState({
+      sliceStrategy: 'ai',
+      submittedSliceStrategy: 'ai',
+      orchestrationStage: 'complete',
+      isSimulating: false,
+      isReportGenerating: false,
+      activeScenarios: [],
+    })
+
+    useAppStore.getState().setSliceStrategy('static')
+
+    const state = useAppStore.getState()
+    expect(state.sliceStrategy).toBe('static')
+    expect(state.submittedSliceStrategy).toBeNull()
+    expect(state.orchestrationStage).toBe('idle')
+  })
 })
 
 describe('active scenario lifecycle', () => {

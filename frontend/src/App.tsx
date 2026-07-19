@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { CanvasCityMap } from './components/CityMap/CanvasCityMap'
 import { AgentPanel } from './components/AgentPanel/AgentPanel'
 import { SliceDashboard } from './components/Dashboard/SliceDashboard'
@@ -9,6 +9,7 @@ import { useAppStore } from './store/appStore'
 import type { SliceStrategy } from './store/appStore'
 import { hasSelectedLocale, useLocale, type Locale } from './i18n'
 import { LearningCenter } from './components/LearningCenter/LearningCenter'
+import { Free5gcWebuiLink } from './components/Free5gcWebuiLink/Free5gcWebuiLink'
 import { AUTH_REQUIRED_EVENT, hasAccessToken, setAccessToken } from './services/auth'
 
 export default function App() {
@@ -17,6 +18,8 @@ export default function App() {
   const [authorized, setAuthorized] = useState(hasAccessToken)
   const [learningOpen, setLearningOpen] = useState(false)
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('events')
+  const topologyColumnRef = useRef<HTMLElement>(null)
+  const [topologyCardHeight, setTopologyCardHeight] = useState(0)
   const wsConnected = useAppStore((state) => state.wsConnected)
   const runtimeBusy = useAppStore((state) => state.runtimeBusy)
   const sliceStrategy = useAppStore((state) => state.sliceStrategy)
@@ -32,6 +35,20 @@ export default function App() {
   useEffect(() => {
     if (!aiWorkspaceEnabled && workspaceTab === 'decision') setWorkspaceTab('events')
   }, [aiWorkspaceEnabled, workspaceTab])
+
+  useEffect(() => {
+    const topologyColumn = topologyColumnRef.current
+    if (!topologyColumn) return
+    const syncHeight = () => setTopologyCardHeight(Math.ceil(topologyColumn.getBoundingClientRect().height))
+    syncHeight()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', syncHeight)
+      return () => window.removeEventListener('resize', syncHeight)
+    }
+    const observer = new ResizeObserver(syncHeight)
+    observer.observe(topologyColumn)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     if (!languageChosen || !authorized) return
@@ -117,12 +134,16 @@ export default function App() {
         </div>
       )}
       <main className="grid flex-1 grid-cols-1 items-start gap-3 p-3 xl:grid-cols-[minmax(620px,1.08fr)_minmax(520px,0.92fr)]">
-        <section className="min-w-0" aria-label={text('城市網路地圖', 'City network map')}>
+        <section ref={topologyColumnRef} className="min-w-0" aria-label={text('城市網路地圖', 'City network map')}>
           <CanvasCityMap />
         </section>
 
-        <section className="min-w-0 overflow-hidden rounded-lg border border-city-border bg-white shadow-[0_18px_45px_rgba(15,23,42,0.08)]" aria-label={text('模擬控制與資訊', 'Simulation controls and information')}>
-          <div className="overflow-hidden border-b border-slate-200 bg-slate-50/80" role="tablist" aria-label={text('模擬資訊分頁', 'Simulation information tabs')}>
+        <section
+          className="min-w-0 overflow-hidden rounded-lg border border-city-border bg-white shadow-[0_18px_45px_rgba(15,23,42,0.08)] xl:flex xl:min-h-0 xl:flex-col xl:h-[var(--topology-card-height)]"
+          style={workspaceHeightStyle(topologyCardHeight)}
+          aria-label={text('模擬控制與資訊', 'Simulation controls and information')}
+        >
+          <div className="shrink-0 overflow-hidden border-b border-slate-200 bg-slate-50/80" role="tablist" aria-label={text('模擬資訊分頁', 'Simulation information tabs')}>
             <div className="grid w-full grid-cols-4 px-1 pt-2 sm:px-2">
               {WORKSPACE_TABS.map((tab) => {
                 const selected = workspaceTab === tab.id
@@ -160,7 +181,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="min-h-[680px] bg-slate-50/35 p-3 sm:p-4">
+          <div className="min-h-[680px] bg-slate-50/35 p-3 sm:p-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto">
             <WorkspacePanel id="events" activeTab={workspaceTab}><EventConsole /></WorkspacePanel>
             <WorkspacePanel id="decision" activeTab={workspaceTab}><AgentPanel /></WorkspacePanel>
             <WorkspacePanel id="dashboard" activeTab={workspaceTab}><SliceDashboard /></WorkspacePanel>
@@ -172,6 +193,7 @@ export default function App() {
                   <p className="mt-2 text-sm leading-6 text-slate-600">
                     {text('集中查看 free5GC、AgentxG 規則式決策引擎與 EKS 的狀態；更細部的事件執行紀錄可在「事件設定」分頁中檢視。', 'Monitor free5GC, the AgentxG rules-based decision engine, and EKS in one place. Detailed execution records remain available in the Event Setup tab.')}
                   </p>
+                  <Free5gcWebuiLink />
                   <div className="mt-4 grid gap-3 sm:grid-cols-3">
                     {[
                       { name: 'free5GC', status: text('連線中', 'Connected') },
@@ -199,6 +221,12 @@ type WorkspaceTab = 'events' | 'decision' | 'dashboard' | 'engineering'
 
 export function isAiWorkspaceEnabled(strategy: SliceStrategy, submittedStrategy: SliceStrategy | null): boolean {
   return (submittedStrategy ?? strategy) === 'ai'
+}
+
+export function workspaceHeightStyle(topologyCardHeight: number): CSSProperties {
+  return {
+    '--topology-card-height': topologyCardHeight > 0 ? `${Math.ceil(topologyCardHeight)}px` : 'auto',
+  } as CSSProperties
 }
 
 const WORKSPACE_TABS: Array<{ id: WorkspaceTab; zh: string; en: string; icon: string }> = [
