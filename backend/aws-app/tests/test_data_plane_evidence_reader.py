@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 from agent_runtime.data_plane_evidence_reader import KubernetesDataPlaneEvidenceReader
 
@@ -86,3 +87,19 @@ def test_reader_consumes_collector_pod_log_via_read_only_kubernetes_api() -> Non
     result = reader.read("exec-nonce-1", 3, "000004", "iot", not_before, 1.0, 5.0)
     assert result["reader"] == "kubernetes-job-log"
     assert result["collectorPod"] == "collector-job-1"
+
+
+def test_low_rate_probe_has_proportional_effect_tolerance() -> None:
+    assert KubernetesDataPlaneEvidenceReader.effect_matches_target(0.2, 0.1, 0.1)
+
+
+def test_evidence_collector_selects_scenario_iperf_deployments() -> None:
+    root = Path(__file__).resolve().parents[3]
+    scenario_source = (root / "backend/aws-app/scenario_environment.py").read_text(encoding="utf-8")
+    collector_manifest = (root / "k8s/pfcp-evidence-collector.yaml").read_text(encoding="utf-8")
+
+    expected_annotations = '"5gcityverse.io/execution-id": str(execution_id or "")'
+    expected_selector = "get deployments -l 5gcityverse.io/execution-id"
+    assert expected_annotations in scenario_source
+    assert expected_selector in collector_manifest
+    assert 'logs "$iperf_pod" -c iperf3-client' in collector_manifest

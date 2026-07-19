@@ -106,7 +106,7 @@ spec:
                 - |
                   echo "EVIDENCE_VERSION=2"
                   NS=free5gc
-                  kubectl -n "$NS" get deployments -l app.kubernetes.io/component=iperf3 \
+                  kubectl -n "$NS" get deployments -l 5gcityverse.io/execution-id \
                     -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.5gcityverse\.io/execution-id}{"|"}{.metadata.annotations.5gcityverse\.io/sst}{"|"}{.metadata.annotations.5gcityverse\.io/sd}{"|"}{.metadata.annotations.5gcityverse\.io/dnn}{"\n"}{end}' \
                   | while IFS='|' read -r deployment execution sst sd dnn; do
                     [ -n "$execution" ] || continue
@@ -151,7 +151,7 @@ spec:
                     echo "BEGIN_IPERF"
                     if [ -n "$iperf_pod" ]; then
                       echo "PROVENANCE pod=$iperf_pod source=iperf3"
-                      kubectl -n "$NS" logs "$iperf_pod" --since=3m --tail=100 || true
+                    kubectl -n "$NS" logs "$iperf_pod" -c iperf3-client --since=3m --tail=100 || true
                     else
                       echo "UNSUPPORTED iperf-pod-not-found"
                     fi

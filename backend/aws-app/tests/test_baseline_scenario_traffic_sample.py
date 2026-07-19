@@ -159,5 +159,12 @@ def test_resident_baseline_sidecar_is_tun_bound_citizen_evidence() -> None:
     assert sample["interface"] == "uesimtun0"
     assert metrics["userPlaneThroughputMbps"] > 0
     assert metrics["nonUserPlaneThroughputMbps"] == 0
+    assert metrics["ueTunProbe"] == {
+        "ready": True,
+        "interface": "uesimtun0",
+        "throughputMbps": sample["throughputMbps"],
+        "packetLossPercent": sample["lostPercent"],
+        "measurementSource": "resident-tun-iperf3",
+    }
     assert CityVerseBackendApp.baseline_scenario_throughput(metrics) > 0
     assert any(edge.get("scenario") == "baseline" for edge in backend.scenario_edges_from_metrics(metrics))

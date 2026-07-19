@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import agent_runtime.tool_gateway as tool_gateway_module
@@ -30,7 +31,7 @@ def _gateway(
         lambda_client=lambda_client,
         record_hit=record_hit,
         evidence_reader=evidence_reader,
-        qer_actuator=qer_actuator or (lambda _cfg: {"status": "applied", "appliedSessions": 1}),
+        qer_actuator=qer_actuator or (lambda _cfg, **_kwargs: {"status": "applied", "appliedSessions": 1}),
     )
 
 
@@ -95,6 +96,56 @@ class _SkippedGateway:
         intent: dict[str, Any],
     ) -> dict[str, Any]:
         return {"status": "skipped"}
+
+
+def test_activate_qos_policy_accepts_runtime_dict_bandwidth(
+    valid_event_config,
+    healthy_metrics,
+    baseline_slices,
+) -> None:
+    runtime_cfg = SimpleNamespace(**valid_event_config.to_dict())
+    gateway = _gateway(
+        healthy_metrics,
+        baseline_slices,
+        lambda_function_names={"activate_qos_policy": "qos-fn"},
+        lambda_client=_FakeLambdaClient(),
+        evidence_reader=_StaticEvidenceReader({}),
+    )
+
+    result = gateway.activate_qos_policy({}, runtime_cfg, {"eventType": "iot_surge"})
+
+    assert result["controlPlaneStatus"] == "success"
+    assert "'dict' object has no attribute 'to_dict'" not in str(result)
+
+
+def test_measured_before_accepts_tun_bound_client_json() -> None:
+    metrics = {
+        "throughputMbps": 1.2,
+        "iperf3": {
+            "scenario": "network_round",
+            "source": "client-json",
+            "transport": "free5gc-tun",
+            "throughputMbps": 0.2,
+        },
+    }
+
+    assert ToolGateway.measured_before_mbps(metrics, {"eventType": "network_round"}) == 0.2
+
+
+def test_measured_before_correlates_network_round_batch_scenario() -> None:
+    metrics = {
+        "iperf3": {
+            "scenario": "concert",
+            "source": "client-json",
+            "transport": "free5gc-tun",
+            "throughputMbps": 0.2,
+        },
+    }
+
+    assert ToolGateway.measured_before_mbps(
+        metrics,
+        {"eventType": "network_round", "batchScenarios": ["concert"]},
+    ) == 0.2
 
 
 def test_invoke_tool_lambda_reports_not_configured_and_call_wraps_result(
@@ -227,7 +278,7 @@ def test_activate_qos_policy_fails_when_pfcp_actuator_rejects(
         baseline_slices,
         lambda_function_names={"activate_qos_policy": "qos-fn"},
         lambda_client=_FakeLambdaClient(),
-        qer_actuator=lambda _cfg: {"status": "failed", "httpStatus": 502},
+        qer_actuator=lambda _cfg, **_kwargs: {"status": "failed", "httpStatus": 502},
     )
 
     result = gateway.activate_qos_policy({}, valid_event_config, {"eventType": "iot_surge"})
@@ -255,9 +306,32 @@ def test_pfcp_actuator_targets_exact_snssai_and_uses_private_service_proxy(
     assert result["status"] == "applied"
     method, path, body, kwargs = fake_k8s.calls[0]
     assert method == "POST"
-    assert path.startswith("/api/v1/namespaces/free5gc/services/http:")
-    assert body == {"sst": 3, "sd": "000003", "uplinkMbrKbps": 1000, "downlinkMbrKbps": 1000}
+    assert path.startswith(
+        "/api/v1/namespaces/free5gc/services/http:free5gc-free5gc-smf-service:8080/proxy"
+    )
+    assert body == {"supi": "ue-1", "uplinkMbrKbps": 1000, "downlinkMbrKbps": 1000}
     assert kwargs["extra_headers"] == {"X-SMF-QER-Actuator-Token": "runtime-secret"}
+
+
+def test_pfcp_actuator_accepts_runtime_dict_bandwidth(
+    monkeypatch,
+    valid_event_config,
+    healthy_metrics,
+    baseline_slices,
+) -> None:
+    runtime_cfg = SimpleNamespace(**valid_event_config.to_dict())
+    fake_k8s = _FakeKubernetesClient()
+    gateway = _gateway(healthy_metrics, baseline_slices)
+    gateway.environment.cluster_name = "private-eks"
+    gateway.environment.namespace = "free5gc"
+    monkeypatch.setenv("SMF_QER_ACTUATOR_TOKEN", "runtime-secret")
+    monkeypatch.setattr(tool_gateway_module, "get_eks_client", lambda _cluster: fake_k8s)
+
+    result = gateway.actuate_pfcp_qer(runtime_cfg)
+
+    assert result["status"] == "applied"
+    assert fake_k8s.calls[0][2]["uplinkMbrKbps"] == 1000
+    assert fake_k8s.calls[0][2]["downlinkMbrKbps"] == 1000
 
 
 def test_patch_hpa_returns_skipped_when_lambda_is_not_configured(

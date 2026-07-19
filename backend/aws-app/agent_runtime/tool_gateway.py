@@ -39,7 +39,7 @@ class ToolGateway:
         lambda_client: Any | None = None,
         record_hit: Callable[[dict[str, Any]], None] | None = None,
         evidence_reader: Any | None = None,
-        qer_actuator: Callable[[EventConfig], dict[str, Any]] | None = None,
+        qer_actuator: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.metrics = metrics
         self.free5gc = free5gc
@@ -163,33 +163,50 @@ class ToolGateway:
             "slice_sst": cfg.slice_sst,
             "slice_sd": cfg.slice_sd,
             "five_qi": cfg.five_qi,
-            "mbr": cfg.mbr.to_dict(),
-            "gbr": cfg.gbr.to_dict(),
+            "mbr": cfg.mbr.to_dict() if hasattr(cfg.mbr, "to_dict") else dict(cfg.mbr),
+            "gbr": cfg.gbr.to_dict() if hasattr(cfg.gbr, "to_dict") else dict(cfg.gbr),
         }
         result = self.invoke_tool_lambda("activate_qos_policy", payload)
         result["controlPlaneStatus"] = result.get("status", "failed")
-        pfcp_actuation = self.qer_actuator(cfg)
-        result["pfcpActuation"] = pfcp_actuation
+        before_mbps = self.measured_before_mbps(before_metrics, intent)
+        configured_mbps = self.bandwidth_mbps(self.bandwidth_direction(cfg.mbr, "uplink"))
+        probe_mbps = max(0.05, round(before_mbps * 0.5, 3)) if before_mbps > 0 else configured_mbps
+        pfcp_actuation = self.qer_actuator(
+            cfg,
+            uplink_mbps=probe_mbps,
+            downlink_mbps=probe_mbps,
+        )
         nested = result.get("result") if isinstance(result.get("result"), dict) else {}
         if isinstance(nested.get("dataPlaneEvidence"), dict):
             result["claimedEvidence"] = nested.get("dataPlaneEvidence")
         trusted_evidence: dict[str, Any] = {}
         if self.evidence_reader is not None:
             try:
-                trusted_evidence = self.evidence_reader.read(
+                read_evidence = getattr(self.evidence_reader, "read_until", self.evidence_reader.read)
+                trusted_evidence = read_evidence(
                     str(params.get("executionId") or intent.get("executionId") or ""),
                     cfg.slice_sst,
                     cfg.slice_sd,
                     cfg.dnn,
                     evidence_not_before,
-                    self.bandwidth_mbps(cfg.mbr.uplink),
-                    self.measured_before_mbps(before_metrics, intent),
+                    probe_mbps,
+                    before_mbps,
                 )
             except Exception as exc:
                 result["evidenceReaderError"] = str(exc)
+        restoration = self.qer_actuator(cfg)
+        result["pfcpActuation"] = {
+            **pfcp_actuation,
+            "probeMbrMbps": probe_mbps,
+            "restoration": restoration,
+        }
         result["evidenceReaderStatus"] = "correlated" if trusted_evidence else "unavailable"
         evidence = DataPlaneEvidence.assess(trusted_evidence, before_metrics, self.current_metrics())
-        if result["controlPlaneStatus"] != "success" or pfcp_actuation.get("status") != "applied":
+        if (
+            result["controlPlaneStatus"] != "success"
+            or pfcp_actuation.get("status") != "applied"
+            or restoration.get("status") != "applied"
+        ):
             evidence["actuatorStatus"] = "failed"
         result.update(evidence)
         # Fail closed: a northbound/SM-policy success is not a PFCP QER success.
@@ -201,7 +218,13 @@ class ToolGateway:
                 result["status"] = "failed"
         return result
 
-    def actuate_pfcp_qer(self, cfg: EventConfig) -> dict[str, Any]:
+    def actuate_pfcp_qer(
+        self,
+        cfg: EventConfig,
+        *,
+        uplink_mbps: float | None = None,
+        downlink_mbps: float | None = None,
+    ) -> dict[str, Any]:
         cluster_name = str(getattr(self.environment, "cluster_name", "") or "").strip()
         namespace = str(getattr(self.environment, "namespace", "") or "").strip()
         token = os.environ.get("SMF_QER_ACTUATOR_TOKEN", "").strip()
@@ -210,19 +233,29 @@ class ToolGateway:
         if not token:
             return {"status": "failed", "error": "SMF QER actuator token is unavailable"}
 
-        uplink_kbps = max(1, min(500000, round(self.bandwidth_mbps(cfg.mbr.uplink) * 1000)))
-        downlink_kbps = max(1, min(500000, round(self.bandwidth_mbps(cfg.mbr.downlink) * 1000)))
-        service = "free5gc-free5gc-smf-smf-service"
+        configured_uplink = self.bandwidth_mbps(self.bandwidth_direction(cfg.mbr, "uplink"))
+        configured_downlink = self.bandwidth_mbps(self.bandwidth_direction(cfg.mbr, "downlink"))
+        uplink_kbps = max(1, min(500000, round(
+            (configured_uplink if uplink_mbps is None else uplink_mbps) * 1000
+        )))
+        downlink_kbps = max(1, min(500000, round(
+            (configured_downlink if downlink_mbps is None else downlink_mbps) * 1000
+        )))
+        service = os.environ.get("FREE5GC_SMF_SERVICE_NAME", "free5gc-free5gc-smf-service").strip()
         path = (
             f"/api/v1/namespaces/{namespace}/services/http:{service}:8080/proxy"
             "/nsmf-oam/v1/qer-actuation"
         )
+        ue_ids = list(getattr(cfg, "ue_ids", []) or [])
+        selector = {"supi": str(ue_ids[0])} if ue_ids else {
+            "sst": int(cfg.slice_sst),
+            "sd": str(cfg.slice_sd),
+        }
         status, response = get_eks_client(cluster_name).request(
             "POST",
             path,
             {
-                "sst": int(cfg.slice_sst),
-                "sd": str(cfg.slice_sd),
+                **selector,
                 "uplinkMbrKbps": uplink_kbps,
                 "downlinkMbrKbps": downlink_kbps,
             },
@@ -242,6 +275,12 @@ class ToolGateway:
         }
 
     @staticmethod
+    def bandwidth_direction(value: Any, direction: str) -> str:
+        if isinstance(value, dict):
+            return str(value.get(direction) or "")
+        return str(getattr(value, direction, "") or "")
+
+    @staticmethod
     def bandwidth_mbps(value: str) -> float:
         match = re.search(r"(\d+(?:\.\d+)?)\s*([KMG])?", str(value or ""), re.IGNORECASE)
         if not match:
@@ -253,12 +292,19 @@ class ToolGateway:
     @staticmethod
     def measured_before_mbps(metrics: dict[str, Any], intent: dict[str, Any]) -> float:
         iperf = metrics.get("iperf3") if isinstance(metrics.get("iperf3"), dict) else {}
-        if str(iperf.get("scenario") or "") != str(intent.get("eventType") or ""):
+        expected_scenarios = intent.get("batchScenarios") or [intent.get("eventType")]
+        if isinstance(expected_scenarios, str):
+            expected_scenarios = [expected_scenarios]
+        if str(iperf.get("scenario") or "") not in {str(item) for item in expected_scenarios if item}:
             return -1.0
-        if str(iperf.get("source") or "") not in {"server-log", "free5gc-tun", "iperf3"}:
+        source = str(iperf.get("source") or "")
+        transport = str(iperf.get("transport") or "")
+        if source not in {"server-log", "free5gc-tun", "iperf3"} and not (
+            source == "client-json" and transport == "free5gc-tun"
+        ):
             return -1.0
         try:
-            return float(metrics.get("throughputMbps"))
+            return float(iperf.get("throughputMbps"))
         except (TypeError, ValueError):
             return -1.0
 

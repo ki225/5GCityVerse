@@ -116,6 +116,15 @@ def test_scenario_ue_request_fits_fragmented_control_plane_capacity(valid_event_
 
     assert ue["resources"]["requests"]["cpu"] == "125m"
     assert ue["resources"]["limits"]["cpu"] == "750m"
+    expected_evidence = {
+        "5gcityverse.io/execution-id": "exec-capacity",
+        "5gcityverse.io/sst": str(valid_event_config.slice_sst),
+        "5gcityverse.io/sd": str(valid_event_config.slice_sd),
+        "5gcityverse.io/dnn": str(valid_event_config.dnn),
+    }
+    assert manifest["metadata"]["annotations"] == expected_evidence
+    pod_annotations = manifest["spec"]["template"]["metadata"]["annotations"]
+    assert expected_evidence.items() <= pod_annotations.items()
 
 
 def test_ueransim_deployment_manifest_mounts_writable_tmp_with_read_only_root(valid_event_config) -> None:

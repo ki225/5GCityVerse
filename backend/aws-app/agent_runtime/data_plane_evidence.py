@@ -222,8 +222,8 @@ class DataPlaneEvidence:
             expected = float(item["expectedMbps"])
             actual = float(after_mbps)
             baseline = float(before_mbps)
-            tolerance = max(0.5, expected * 0.15)
-            minimum_delta = max(0.5, expected * 0.10)
+            tolerance = max(0.02, expected * 0.15)
+            minimum_delta = max(0.02, expected * 0.10)
             moved_toward_target = (
                 (expected > baseline and actual - baseline >= minimum_delta)
                 or (expected < baseline and baseline - actual >= minimum_delta)

@@ -98,7 +98,7 @@ index ff38a20..fc21b5d 100644
  	initSmfContext()
  	rsp, err := message.BuildPfcpSessionEstablishmentResponse()
 diff --git a/internal/sbi/api_oam.go b/internal/sbi/api_oam.go
-index 7541c5a..754e867 100644
+index 7541c5a..375f2e5 100644
 --- a/internal/sbi/api_oam.go
 +++ b/internal/sbi/api_oam.go
 @@ -1,7 +1,10 @@
@@ -112,7 +112,7 @@ index 7541c5a..754e867 100644
  
  	"github.com/gin-gonic/gin"
  )
-@@ -28,7 +31,77 @@ func (s *Server) getOAMRoutes() []Route {
+@@ -28,7 +31,82 @@ func (s *Server) getOAMRoutes() []Route {
  			Pattern: "/user-plane-info/",
  			APIFunc: s.HTTPGetSMFUserPlaneInfo,
  		},
@@ -127,6 +127,7 @@ index 7541c5a..754e867 100644
 +
 +type qerActuationRequest struct {
 +	SMContextRef    string `json:"smContextRef"`
++	SUPI            string `json:"supi"`
 +	DNN             string `json:"dnn"`
 +	SST             int32  `json:"sst"`
 +	SD              string `json:"sd"`
@@ -162,10 +163,14 @@ index 7541c5a..754e867 100644
 +		return
 +	}
 +	request.SMContextRef = strings.TrimSpace(request.SMContextRef)
++	request.SUPI = strings.TrimSpace(request.SUPI)
 +	request.DNN = strings.TrimSpace(request.DNN)
 +	request.SD = strings.TrimSpace(request.SD)
 +	selectors := 0
 +	if request.SMContextRef != "" {
++		selectors++
++	}
++	if request.SUPI != "" {
 +		selectors++
 +	}
 +	if request.DNN != "" {
@@ -175,7 +180,7 @@ index 7541c5a..754e867 100644
 +		selectors++
 +	}
 +	if selectors != 1 || (request.SST == 0) != (request.SD == "") {
-+		c.JSON(http.StatusBadRequest, gin.H{"error": "exactly one complete selector is required: smContextRef, dnn, or sst+sd"})
++		c.JSON(http.StatusBadRequest, gin.H{"error": "exactly one complete selector is required: smContextRef, supi, dnn, or sst+sd"})
 +		return
 +	}
 +	const maxMBRKbps = uint64(500000)
@@ -185,17 +190,17 @@ index 7541c5a..754e867 100644
 +		return
  	}
 +	s.Processor().HandleOAMQERActuation(
-+		c, request.SMContextRef, request.DNN, request.SST, request.SD,
++		c, request.SMContextRef, request.SUPI, request.DNN, request.SST, request.SD,
 +		request.UplinkMBRKbps, request.DownlinkMBRKbps)
  }
  
  func (s *Server) HTTPGetUEPDUSessionInfo(c *gin.Context) {
 diff --git a/internal/sbi/processor/oam_qer.go b/internal/sbi/processor/oam_qer.go
-new file mode 100755
-index 0000000..759bff4
+new file mode 100644
+index 0000000..56e4763
 --- /dev/null
 +++ b/internal/sbi/processor/oam_qer.go
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,211 @@
 +package processor
 +
 +import (
@@ -356,7 +361,7 @@ index 0000000..759bff4
 +	return result
 +}
 +
-+func (p *Processor) HandleOAMQERActuation(c *gin.Context, smContextRef, dnn string, sst int32, sd string,
++func (p *Processor) HandleOAMQERActuation(c *gin.Context, smContextRef, supi, dnn string, sst int32, sd string,
 +	uplinkMBRKbps, downlinkMBRKbps uint64,
 +) {
 +	contexts := make([]*smf_context.SMContext, 0)
@@ -376,6 +381,9 @@ index 0000000..759bff4
 +	matched := 0
 +	applied := 0
 +	for _, smContext := range contexts {
++		if supi != "" && smContext.Supi != supi {
++			continue
++		}
 +		result := actuateSMContextQER(smContext, dnn, sst, sd, uplinkMBRKbps, downlinkMBRKbps)
 +		if result.Status == "skipped" {
 +			continue

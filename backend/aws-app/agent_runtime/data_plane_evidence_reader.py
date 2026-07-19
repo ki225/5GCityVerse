@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import time
 import urllib.parse
 from typing import Any, Callable
 
@@ -64,6 +65,29 @@ class KubernetesDataPlaneEvidenceReader:
                 artifact["reader"] = "kubernetes-job-log"
                 return artifact
         return {}
+
+    def read_until(
+        self,
+        execution_id: str,
+        sst: int,
+        sd: str,
+        dnn: str,
+        not_before: str,
+        expected_mbps: float,
+        before_mbps: float,
+        *,
+        wait_seconds: float = 90,
+        poll_seconds: float = 5,
+    ) -> dict[str, Any]:
+        """Wait a bounded interval for the independent CronJob artifact."""
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while True:
+            evidence = self.read(
+                execution_id, sst, sd, dnn, not_before, expected_mbps, before_mbps
+            )
+            if evidence or time.monotonic() >= deadline:
+                return evidence
+            time.sleep(min(max(0.0, poll_seconds), max(0.0, deadline - time.monotonic())))
 
     def correlate(
         self,
@@ -155,10 +179,10 @@ class KubernetesDataPlaneEvidenceReader:
     def effect_matches_target(before_mbps: float, after_mbps: float, expected_mbps: float) -> bool:
         if before_mbps < 0 or after_mbps <= 0 or expected_mbps <= 0:
             return False
-        tolerance = max(0.5, expected_mbps * 0.15)
+        tolerance = max(0.02, expected_mbps * 0.15)
         if abs(after_mbps - expected_mbps) > tolerance:
             return False
-        minimum_delta = max(0.5, expected_mbps * 0.10)
+        minimum_delta = max(0.02, expected_mbps * 0.10)
         if expected_mbps > before_mbps:
             return after_mbps - before_mbps >= minimum_delta
         if expected_mbps < before_mbps:

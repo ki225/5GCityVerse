@@ -1880,7 +1880,12 @@ class CityVerseBackendApp:
         samples = [sample for sample in traffic if isinstance(sample, dict)]
         active_scenarios = {str(item) for item in (metrics.get("activeScenarios") or []) if str(item) in EVENT_CONFIG}
         if active_scenarios:
-            samples = [sample for sample in samples if str(sample.get("scenario") or "") in active_scenarios]
+            # The resident citizen UE is an always-on baseline, not a selectable
+            # burst scenario. Keep its measured TUN path visible while a batch is
+            # active; filtering only to activeScenarios used to erase the
+            # residential -> gNB -> UPF -> DN flow from the live dashboard.
+            visible_scenarios = active_scenarios | {"baseline", "baseline-embb"}
+            samples = [sample for sample in samples if str(sample.get("scenario") or "") in visible_scenarios]
         edges: list[dict[str, Any]] = []
         for index, sample in enumerate(samples):
             if not isinstance(sample, dict):
@@ -1940,7 +1945,7 @@ class CityVerseBackendApp:
             "baseline-embb": ("residential", "eMBB", 9),
             "concert": ("mall", "eMBB", 9),
             "medical": ("hospital", "URLLC", 1),
-            "typhoon": ("hospital", "URLLC", 2),
+            "typhoon": ("disaster", "URLLC", 2),
             "iot_surge": ("factory", "mMTC", 79),
             "accident": ("highway", "V2X", 79),
         }
@@ -2251,7 +2256,13 @@ class CityVerseBackendApp:
             runtime_metrics = self.ueransim_runtime_metrics(k8s, items) if include_runtime_logs else {}
             iperf3_metrics = self.iperf3_runtime_metrics(k8s, items) if include_runtime_logs else {}
             if iperf3_metrics:
+                # Prefer the resident ping probe when it is healthy because it
+                # carries RTT/loss. Otherwise retain the resident TUN-bound
+                # iperf sample as honest throughput-only citizen evidence.
+                resident_ping_probe = runtime_metrics.get("ueTunProbe")
                 runtime_metrics.update(iperf3_metrics)
+                if isinstance(resident_ping_probe, dict) and resident_ping_probe.get("ready") is True:
+                    runtime_metrics["ueTunProbe"] = resident_ping_probe
             # TCP iperf3 has no datagram counter and therefore deliberately marks
             # GTP pkt/s unavailable.  The exporter reads the actual upfgtp
             # interface, so its fresh samples are the authoritative replacement.
@@ -2711,6 +2722,24 @@ class CityVerseBackendApp:
             "evidenceLevel": EvidenceLevel.MEASURED.value,
             "timestamp": TimeUtils.epoch_millis(),
         }
+        resident_citizen_sample = next(
+            (
+                sample
+                for sample in samples
+                if sample.get("scenario") == "baseline"
+                and sample.get("transport") == "free5gc-tun"
+                and str(sample.get("pod") or "").startswith(f"{self.settings.ueransim_ue_deployment}-")
+            ),
+            None,
+        )
+        if resident_citizen_sample:
+            result["ueTunProbe"] = {
+                "ready": True,
+                "interface": resident_citizen_sample.get("interface") or "uesimtun0",
+                "throughputMbps": resident_citizen_sample.get("throughputMbps"),
+                "packetLossPercent": resident_citizen_sample.get("lostPercent"),
+                "measurementSource": "resident-tun-iperf3",
+            }
         if has_packet_evidence:
             result["gtpPacketsPerSec"] = round(
                 sum(float(sample.get("packetsPerSecond") or 0.0) for sample in samples), 3

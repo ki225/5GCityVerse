@@ -837,16 +837,23 @@ integrityMaxRate:
         deployment_name = f"ueransim-{event_type.replace('_', '-')}"
         if event_type == "typhoon":
             manifest = self.ueransim_deployment_manifest(deployment_name, "ueransim-ue-config-typhoon", "1", event_type, {}, execution_id)
-            return self.attach_tun_traffic(manifest, event_type, cfg, server_address)
-        if event_type == "iot_surge":
+        elif event_type == "iot_surge":
             resources = {"requests": {"cpu": "125m", "memory": "256Mi"}, "limits": {"cpu": "750m", "memory": "768Mi"}}
             # One real representative UE carries the scale-adjusted aggregate
             # traffic. Starting 50 identical UEs with a single SUPI caused SM
             # context collisions and made the measured round nondeterministic.
             manifest = self.ueransim_deployment_manifest(deployment_name, "ueransim-ue-config-mmtc", "1", event_type, resources, execution_id)
-            return self.attach_tun_traffic(manifest, event_type, cfg, server_address)
-        resources = {"requests": {"cpu": "125m", "memory": "256Mi"}, "limits": {"cpu": "750m", "memory": "768Mi"}}
-        manifest = self.ueransim_deployment_manifest(deployment_name, UE_CONFIG_MAPS[event_type], "1", event_type, resources, execution_id)
+        else:
+            resources = {"requests": {"cpu": "125m", "memory": "256Mi"}, "limits": {"cpu": "750m", "memory": "768Mi"}}
+            manifest = self.ueransim_deployment_manifest(deployment_name, UE_CONFIG_MAPS[event_type], "1", event_type, resources, execution_id)
+        evidence_annotations = {
+            "5gcityverse.io/execution-id": str(execution_id or ""),
+            "5gcityverse.io/sst": str(cfg.slice_sst),
+            "5gcityverse.io/sd": str(cfg.slice_sd),
+            "5gcityverse.io/dnn": str(cfg.dnn),
+        }
+        manifest["metadata"]["annotations"] = evidence_annotations
+        manifest["spec"]["template"]["metadata"]["annotations"].update(evidence_annotations)
         return self.attach_tun_traffic(manifest, event_type, cfg, server_address)
 
     def attach_tun_traffic(self, manifest: dict[str, Any], event_type: str, cfg: EventConfig, server_address: str | None = None) -> dict[str, Any]:

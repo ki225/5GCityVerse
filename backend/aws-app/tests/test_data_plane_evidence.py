@@ -100,3 +100,18 @@ def test_assess_marks_stock_runtime_unsupported_instead_of_success() -> None:
     assert assessed["actuatorStatus"] == "unsupported"
     assert assessed["pfcpEvidence"]["status"] == "unsupported"
     assert assessed["kernelEvidence"]["status"] == "unsupported"
+
+
+def test_assess_accepts_measured_low_rate_qer_effect() -> None:
+    assessed = DataPlaneEvidence.assess({
+        "pfcp": {"sessionModificationRequests": 1, "sessionModificationResponses": 1, "seids": ["1"]},
+        "kernel": {"pdrCount": 1, "farCount": 1, "qerCount": 1, "teids": ["2"]},
+        "effect": {
+            "measurementSource": "ue-tun-iperf3",
+            "beforeMbps": 0.2,
+            "afterMbps": 0.1,
+            "expectedMbps": 0.1,
+        },
+    })
+
+    assert assessed["actuatorStatus"] == "confirmed"
