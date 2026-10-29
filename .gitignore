@@ -46,3 +46,4 @@ infrastructure/cloud/terraform/$plan
 archive/
 tmp/
 **/node_modules/
+.codex-work/

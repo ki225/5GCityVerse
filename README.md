@@ -2,6 +2,8 @@
 
 5GCityVerse is a 5G network experimentation platform that combines smart city scenarios, an AI orchestrator, and free5GC. City events create simulated UEs and traffic so operators can observe network behavior under different service requirements and experiment with AI driven resource changes.
 
+![](./src/img/image.png)
+
 ## Main features
 
 - **City scenarios and visualization:** Present eMBB, URLLC, mMTC, and V2X demand through city events, with UE, traffic, and execution status.
@@ -17,42 +19,76 @@
 
 ### Prerequisites
 
-- Ubuntu 24.04
-- Linux Python 3.10+
-- Node.js 22.12+
-- Docker
+On Ubuntu 24.04 with an existing Kubernetes cluster, install:
+
+- Bash and Git
+- Python 3.10+ with `pip`, `venv`, and PyYAML
+- Node.js 22.12+ with npm
+- `kubectl` and Helm 3
+
+See the [infrastructure guide](infrastructure/onprem/README.md) for host preparation and the [startup guide](scripts/onprem/README.md) for the backend environment.
 
 ### AI API key
 
 1. Copy `.env.example` to `.env`.
 2. Set `OPENAI_API_KEY`.
 
-### Start the system and network environment
+### Deploy the network
 
-Follow these guides in order:
+Run from the repository root on Ubuntu. Prepare Kubernetes and Helm using the [infrastructure guide](infrastructure/onprem/README.md), and the Python environment using the [startup guide](scripts/onprem/README.md).
 
-1. [On-prem deployment guide](infrastructure/onprem/README.md): Prepare nodes, networking, and the 5G core.
-2. [On-prem startup guide](scripts/onprem/README.md): Configure and start the local backend and frontend.
+1. Generate deployment files using [value.yaml](infrastructure/onprem/value.yaml).
 
-```bash
-# Install frontend dependencies before the first start.
-cd frontend && npm ci
-cd ..
+   ```bash
+   bash infrastructure/onprem/scripts/render.sh
+   ```
 
-# Check dependencies, configuration, and ports.
-bash scripts/onprem/start-onprem.sh --preflight-only
+2. Prepare native network settings.
 
-# Build the frontend, start both services, wait for readiness, and save logs and process identities.
-bash scripts/onprem/start-onprem.sh
+   ```bash
+   sudo "$HOME/.venvs/5gcityverse-onprem/bin/python" -m backend.onprem.operations.deployment.native_runtime --apply
+   ```
 
-# Stop the frontend and backend managed by the launcher.
-bash scripts/onprem/stop-onprem.sh
-```
+3. Use the output directory printed in step 1, then install with Helm from the repository root.
 
-By default, the backend is available at `http://127.0.0.1:8000`, the frontend at `http://127.0.0.1:5173`, and logs at `.tmp/onprem/logs/`.
+   ```bash
+   read -r -p "Render output directory: " RENDER_DIR
+   sudo helm --kubeconfig /etc/kubernetes/admin.conf upgrade --install cityverse "$RENDER_DIR/cityverse-onprem-0.2.0.tgz" \
+     -n free5gc-onprem --create-namespace -f "$RENDER_DIR/values-01.yaml" \
+     -f /var/lib/cityverse/operator-native/bootstrap-values.json \
+     --post-renderer infrastructure/onprem/scripts/post-render.sh
+   ```
 
-**The regular startup mode does not deploy infrastructure and disables local Kubernetes integration by default.** To use native 5G features, prepare the infrastructure first, then start the native backend with a cluster and profile through `start_native_backend.py` as described in the startup guide. Once the native backend is ready, start only the frontend and connect it to that backend:
+### Remove the network
 
-```bash
-bash scripts/onprem/start-onprem.sh --use-existing-backend --backend-port 8000
-```
+1. Uninstall the Helm release.
+
+   ```bash
+   sudo helm --kubeconfig /etc/kubernetes/admin.conf uninstall cityverse -n free5gc-onprem
+   ```
+
+2. To also remove namespaces, PV definitions and host interfaces, follow the [complete cleanup commands](infrastructure/onprem/README.md#shutdown-and-remove-the-project-network). Local data is retained.
+
+### Start the frontend and backend
+
+1. Install frontend dependencies.
+
+   ```bash
+   npm --prefix frontend ci
+   ```
+
+2. Start both services.
+
+   ```bash
+   bash scripts/onprem/start-onprem.sh
+   ```
+
+3. Stop both services.
+
+   ```bash
+   bash scripts/onprem/stop-onprem.sh
+   ```
+
+Defaults: backend `http://127.0.0.1:8000`, frontend `http://127.0.0.1:5173`.
+
+For native 5G integration, custom state files and resource controllers, use the [startup guide](scripts/onprem/README.md).
