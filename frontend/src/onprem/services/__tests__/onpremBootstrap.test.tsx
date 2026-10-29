@@ -12,15 +12,20 @@ describe('on-prem city bootstrap', () => {
             executionAdmission: { schemaVersion: 'cityverse.native-execution-admission/v1',
                 mode: 'baseline-device-reservation', state: 'ready_to_start', generation: 2,
                 observedAt: new Date(now).toISOString(), validUntil: new Date(now + 5000).toISOString(),
-                coreRanReady: true, nativeFleetEmpty: true, profileValid: true,
+                coreRanReady: true, nativeFleetEmpty: true, profileValid: false,
+                profileRequired: false, launchContractReady: true,
                 existingUePduReady: false, serviceEffectVerified: false } };
         expect(nativeDeviceAdmissionReady(status, now)).toBe(true);
         expect(status.state).toBe('absent');
         expect(nativeDeviceAdmissionReady(status, now + 5000)).toBe(false);
         expect(nativeDeviceAdmissionReady({ ...status, state: 'failed' }, now)).toBe(false);
-        for (const field of ['coreRanReady', 'nativeFleetEmpty', 'profileValid'] as const)
+        for (const field of ['coreRanReady', 'nativeFleetEmpty', 'launchContractReady'] as const)
             expect(nativeDeviceAdmissionReady({ ...status, executionAdmission: { ...status.executionAdmission!, [field]: false } }, now)).toBe(false);
         expect(nativeDeviceAdmissionReady({ ...status, executionAdmission: { ...status.executionAdmission!, validUntil: new Date(now + 60000).toISOString() } }, now)).toBe(false);
+        const legacy = { ...status.executionAdmission! };
+        delete legacy.profileRequired;
+        delete legacy.launchContractReady;
+        expect(nativeDeviceAdmissionReady({ ...status, executionAdmission: legacy }, now)).toBe(false);
     });
     it('allows only explicit, clean 100 UE operator commissioning observation', async () => {
         const round = { stage: 'completed', cleanupStatus: 'verified', capabilities: {

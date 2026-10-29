@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { compileCityDemand } from '../city-map/domain/demand'
 import { parseIntentSubmission, parsePendingCityIntent, validateCityIntent } from './cityIntent'
-import { submitServiceIntent } from './intents'
+import { submitServiceIntent, getServiceIntent, releaseServiceIntent, reconcileServiceIntent, getIntentCapabilities } from './intents'
 import { profileRequest } from './profileRequest'
-vi.mock('./browserSession', () => ({ sessionHeaders: () => ({ 'X-CityVerse-Session-Id': 'same-owner', Authorization: 'Bearer fixture-only' }) }))
+vi.mock('./browserSession', () => ({ sessionHeaders: () => ({ 'X-CityVerse-Session-Id': 'same-owner' }) }))
 afterEach(() => vi.unstubAllGlobals())
 function draft() {
   const request = compileCityDemand([{ groupId: 'arena', label: 'Arena', temporary: false, ueCount: 2, profileId: 'video_streaming',
@@ -19,18 +19,29 @@ describe('single formal city intent contract', () => {
     await submitServiceIntent(request.text, request.city_traffic, 'same-key')
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('/api/intents'); expect(JSON.parse(String(init.body))).toEqual({ text:request.text,city_traffic:profileRequest(request.city_traffic) })
-    expect(init.headers).toMatchObject({ 'Idempotency-Key': 'same-key', 'X-CityVerse-Session-Id': 'same-owner', Authorization: 'Bearer fixture-only' })
+    expect(init.headers).toMatchObject({ 'Idempotency-Key': 'same-key', 'X-CityVerse-Session-Id': 'same-owner' })
+    expect(init.headers).not.toHaveProperty('Authorization')
     expect(request.city_traffic.strategy).toBe('none')
   })
   it('preserves the exact original payload and idempotency key across an uncertain retry', async () => {
     const original = draft(), saved = JSON.stringify({ key: 'same-key', payload: original })
     original.city_traffic.demandGroups![0].ueCount = 99
     const restored = parsePendingCityIntent(saved)
-    const fetch = vi.fn(async () => new Response('{}')); vi.stubGlobal('fetch', fetch)
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{}')); vi.stubGlobal('fetch', fetch)
     await submitServiceIntent(restored.payload.text, restored.payload.city_traffic, restored.key)
     await submitServiceIntent(restored.payload.text, restored.payload.city_traffic, restored.key)
     expect(fetch.mock.calls[0]).toEqual(fetch.mock.calls[1])
     expect(restored.payload.city_traffic.demandGroups![0].ueCount).toBe(2)
+  })
+  it('reads capabilities and owned intents and mutates with session and idempotency, without a token', async () => {
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ actions: [], write_configured: true, planner_available: true, observation_available: true }))); vi.stubGlobal('fetch', fetch)
+    await getIntentCapabilities(); await getServiceIntent('owned'); await reconcileServiceIntent('owned'); await releaseServiceIntent('owned')
+    expect(fetch.mock.calls.map(call => call[0])).toEqual(['/api/capabilities', '/api/intents/owned', '/api/intents/owned/reconcile', '/api/intents/owned/release'])
+    for (const [, init] of fetch.mock.calls as unknown as Array<[string, RequestInit]>) {
+      expect(init.headers).toHaveProperty('X-CityVerse-Session-Id', 'same-owner')
+      expect(init.headers).not.toHaveProperty('Authorization')
+      if (init.method === 'POST') expect(init.headers).toHaveProperty('Idempotency-Key')
+    }
   })
   it('rejects count, strategy and spatial-contract tampering before dispatch', () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)

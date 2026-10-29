@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import http from 'node:http'
-import { createFrontendServer } from '../server.mjs'
+import { createFrontendServer, capabilityRequest } from '../server.mjs'
 
 test('production server serves immutable assets and proxies exact onprem requests', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'cityverse-static-'))
@@ -46,5 +46,34 @@ test('production server serves immutable assets and proxies exact onprem request
 test('backend configuration never accepts credentials or a path in its origin', () => {
   for (const backend of ['file:///etc/passwd', 'http://user:secret@localhost', 'http://localhost/api', 'http://localhost?token=x']) {
     assert.throws(() => createFrontendServer({ backend }))
+  }
+})
+
+test('only exact capability GET selects the extended timeout', () => {
+  assert.equal(capabilityRequest('GET', '/api/capabilities'), true)
+  assert.equal(capabilityRequest('GET', '/api/capabilities?view=city'), true)
+  for (const [method, path] of [['POST', '/api/capabilities'], ['GET', '/api/capabilities/other'], ['GET', '/api/intents'], ['GET', '/api/capabilities-other']]) assert.equal(capabilityRequest(method, path), false)
+})
+
+test('capability proxy remains pending beyond 35 seconds and returns a bounded timeout', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'cityverse-capability-'))
+  let started
+  const received = new Promise(resolve => { started = resolve })
+  const backend = http.createServer(() => started())
+  backend.listen(0, '127.0.0.1'); await once(backend, 'listening')
+  const frontend = createFrontendServer({ directory, backend: 'http://127.0.0.1:' + backend.address().port })
+  frontend.listen(0, '127.0.0.1'); await once(frontend, 'listening')
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let settled = false
+  const response = new Promise((resolve, reject) => http.get('http://127.0.0.1:' + frontend.address().port + '/api/capabilities', result => { settled = true; resolve(result) }).on('error', reject))
+  try {
+    await received; t.mock.timers.tick(35001); await new Promise(resolve => setImmediate(resolve))
+    assert.equal(settled, false)
+    t.mock.timers.tick(145000)
+    assert.equal((await response).statusCode, 504)
+  } finally {
+    t.mock.timers.reset(); frontend.closeAllConnections(); backend.closeAllConnections()
+    await new Promise(resolve => frontend.close(resolve)); await new Promise(resolve => backend.close(resolve))
+    await rm(directory, { recursive: true, force: true })
   }
 })

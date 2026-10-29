@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import sirv from 'sirv'
 
 const API_PATH = /^\/(?:api|free5gc|metrics|network|events|health)(?:\/|\?|$)/
+export const capabilityRequest = (method, url) => method === 'GET' && /^\/api\/capabilities(?:\?|$)/.test(url ?? '')
 /** One production server for local use and deployment; no Vite development runtime. */
 export function createFrontendServer({ directory = fileURLToPath(new URL('./dist', import.meta.url)), backend = 'http://127.0.0.1:8000' } = {}) {
   const target = new URL(backend)
@@ -16,11 +17,19 @@ export function createFrontendServer({ directory = fileURLToPath(new URL('./dist
   } })
   const server = http.createServer((request, response) => {
     if (API_PATH.test(request.url ?? '')) {
+      const isCapability = capabilityRequest(request.method, request.url)
+      let deadline
       const upstream = transport.request(new URL(request.url, target), { method: request.method, headers: { ...request.headers, host: target.host } }, result => {
         response.writeHead(result.statusCode ?? 502, result.headers); result.pipe(response)
       })
-      upstream.setTimeout(35000, () => upstream.destroy())
-      upstream.on('error', () => { if (!response.headersSent) { response.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end('{"error":"ONPREM_BACKEND_UNAVAILABLE"}') } else response.destroy() })
+      if (isCapability) deadline = setTimeout(() => {
+        if (!response.headersSent) { response.writeHead(504, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end('{"error":"AI_CAPABILITIES_TIMEOUT"}') }
+        else response.destroy()
+        upstream.destroy()
+      }, 180000)
+      else upstream.setTimeout(35000, () => upstream.destroy())
+      response.on('close', () => { clearTimeout(deadline); upstream.destroy() })
+      upstream.on('error', () => { if (response.writableEnded) return; if (!response.headersSent) { response.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end('{"error":"ONPREM_BACKEND_UNAVAILABLE"}') } else response.destroy() })
       request.on('aborted', () => upstream.destroy()); request.pipe(upstream); return
     }
     if (!['GET', 'HEAD'].includes(request.method ?? '')) { response.writeHead(405); response.end(); return }

@@ -20,6 +20,9 @@ export interface BootstrapStatus {
     coreRanReady: boolean
     nativeFleetEmpty: boolean
     profileValid: boolean
+    profileRequired?: false
+    launchContractReady?: boolean
+    reasonCode?: string | null
     existingUePduReady: false
     serviceEffectVerified: false
   }
@@ -32,7 +35,8 @@ export function nativeDeviceAdmissionReady(status: BootstrapStatus | null, now =
   const observed = Date.parse(a.observedAt), until = Date.parse(a.validUntil)
   return a.schemaVersion === 'cityverse.native-execution-admission/v1'
     && a.mode === 'baseline-device-reservation' && a.state === 'ready_to_start'
-    && a.coreRanReady === true && a.nativeFleetEmpty === true && a.profileValid === true
+    && a.coreRanReady === true && a.nativeFleetEmpty === true
+    && a.profileRequired === false && a.launchContractReady === true
     && a.existingUePduReady === false && a.serviceEffectVerified === false
     && Number.isSafeInteger(a.generation) && a.generation! >= 0
     && Number.isFinite(observed) && Number.isFinite(until)

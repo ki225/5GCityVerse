@@ -1,13 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { getIntentCapabilities, getServiceIntent, IntentRequestError, setIntentControlToken, submitServiceIntent,
+import { getIntentCapabilities, getServiceIntent, IntentRequestError, submitServiceIntent,
   type IntentCapabilities, type IntentCityTraffic, type IntentSubmission, type ServiceIntentView } from '../../services/intents'
 import { ACTIVE_CITY_INTENT, PENDING_CITY_INTENT, parseIntentSubmission, parsePendingCityIntent, validateCityIntent, type PendingCityIntent } from '../../services/cityIntent'
 
 function useFormalIntentState() {
   const [caps, setCaps] = useState<IntentCapabilities | null>(null)
   const [capError, setCapError] = useState('')
+  const [capLoading, setCapLoading] = useState(true)
   const [capRevision, setCapRevision] = useState(0)
-  const [controlToken, setToken] = useState('')
   const [submission, setSubmission] = useState<IntentSubmission | null>(null)
   const [active, setActive] = useState<ServiceIntentView | null>(null)
   const [activeObservedAt, setActiveObservedAt] = useState(0)
@@ -26,16 +26,15 @@ function useFormalIntentState() {
       const accepted = sessionStorage.getItem(ACTIVE_CITY_INTENT)
       if (accepted) setSubmission(parseIntentSubmission(JSON.parse(accepted)))
     } catch { setError('saved_intent_requires_review'); setUncertain(true) }
-    return () => { mounted.current = false; setIntentControlToken('') }
+    return () => { mounted.current = false }
   }, [])
   useEffect(() => {
-    const abort = new AbortController(); setCaps(null); setCapError('')
+    const abort = new AbortController(); setCaps(null); setCapError(''); setCapLoading(true)
     void getIntentCapabilities(abort.signal).then(value => {
       if (abort.signal.aborted) return
-      if (!value || typeof value.write_configured !== 'boolean' || typeof value.planner_available !== 'boolean'
-        || typeof value.observation_available !== 'boolean' || !Array.isArray(value.actions)) throw new Error('invalid_intent_capabilities')
       setCaps(value)
-    }).catch(() => { if (!abort.signal.aborted) setCapError('intent_capabilities_unavailable') })
+    }).catch(cause => { if (!abort.signal.aborted) setCapError(cause instanceof Error ? cause.message : 'capabilities_connection') })
+      .finally(() => { if (!abort.signal.aborted) setCapLoading(false) })
     return () => abort.abort()
   }, [capRevision])
   useEffect(() => {
@@ -72,9 +71,8 @@ function useFormalIntentState() {
     } finally { clearTimeout(timeout); busy.current = false; if (mounted.current) setPending(false) }
   }
   const openWorkspace = useCallback((intentId = '') => setWorkspace(current => ({ intentId, serial: (current?.serial ?? 0) + 1 })), [])
-  return { caps, capError, active, activeObservedAt, submission, pending, uncertain, error, controlToken, workspace, openWorkspace,
-    refresh: () => setCapRevision(value => value + 1),
-    setControlToken: (value: string) => { setToken(value); setIntentControlToken(value); setCapRevision(revision => revision + 1) },
+  return { caps, capError, capLoading, active, activeObservedAt, submission, pending, uncertain, error, workspace, openWorkspace,
+    refresh: () => { setCaps(null); setCapError(''); setCapLoading(true); setCapRevision(value => value + 1) },
     submit: async (text: string, traffic: IntentCityTraffic) => {
       if (busy.current || uncertain) return
       const record = { key: `city-intent:${traffic.requestId}`, payload: { text: text.trim(), city_traffic: structuredClone(traffic) } }

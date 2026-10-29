@@ -4,8 +4,6 @@ import type { ScenarioRequest } from '../onprem/services/onpremScenarios'
 import { validateCityIntent } from './cityIntent'
 import { profileRequest } from './profileRequest'
 
-let controlToken = ''
-export function setIntentControlToken(value: string): void { controlToken = value.trim() }
 export class IntentRequestError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code || `HTTP ${status}`) }
   get definitive() { return [400, 401, 403, 404, 409, 422].includes(this.status) || this.code === 'INTENT_WRITE_NOT_CONFIGURED' }
@@ -87,7 +85,6 @@ async function request<T>(path: string, options: RequestInit = {}, responseLimit
     ...options,
     headers: {
       'Content-Type': 'application/json', ...sessionHeaders(),
-      ...(controlToken ? { Authorization: `Bearer ${controlToken}` } : {}),
       ...(mutation ? { 'Idempotency-Key': crypto.randomUUID() } : {}), ...options.headers,
     },
   })
@@ -183,8 +180,37 @@ export const getIntentOperation = (id: string, signal?: AbortSignal) =>
   request<IntentOperation>(`/api/operations/${encodeURIComponent(id)}`, { signal })
 export const getIntentMembers = (id: string, signal?: AbortSignal, offset = 0) =>
   request<{ items: unknown[]; total: number; rejected: unknown[] }>(`/api/intents/${encodeURIComponent(id)}/members?limit=100&offset=${pageOffset(offset)}`, { signal })
-export const getIntentCapabilities = (signal?: AbortSignal) =>
-  request<IntentCapabilities>('/api/capabilities', { signal })
+/** A bounded background read; cancellation never retains a previous write grant. */
+export async function getIntentCapabilities(signal?: AbortSignal): Promise<IntentCapabilities> {
+  const controller = new AbortController()
+  const relay = () => controller.abort()
+  signal?.addEventListener('abort', relay, { once: true })
+  let timeout = false, stop = () => undefined as void
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    stop = () => reject(new Error(timeout ? 'capabilities_timeout' : 'capabilities_cancelled'))
+    controller.signal.addEventListener('abort', stop, { once: true })
+  })
+  const timer = setTimeout(() => { timeout = true; controller.abort() }, 185000)
+  if (signal?.aborted) relay()
+  try {
+    const read = async () => {
+      const response = await fetch(`${apiBaseUrl()}/api/capabilities`, { signal: controller.signal, headers: sessionHeaders() })
+      if (!response.ok) { void response.body?.cancel().catch(() => undefined); throw new Error(response.status === 504 ? 'capabilities_timeout' : response.status === 502 || response.status === 503 ? 'capabilities_connection' : 'capabilities_http') }
+      let value: unknown
+      try { value = await boundedJson(response, 256 * 1024, controller.signal) }
+      catch { throw new Error('capabilities_invalid_response') }
+      const row = object(value)
+      if (typeof row.write_configured !== 'boolean' || typeof row.planner_available !== 'boolean'
+        || typeof row.observation_available !== 'boolean' || !Array.isArray(row.actions)) throw new Error('capabilities_invalid_response')
+      return value as IntentCapabilities
+    }
+    return await Promise.race([read(), cancelled])
+  } catch (cause) {
+    if (controller.signal.aborted) throw new Error(timeout ? 'capabilities_timeout' : 'capabilities_cancelled')
+    if (cause instanceof Error && /^capabilities_/.test(cause.message)) throw cause
+    throw new Error('capabilities_connection')
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); controller.signal.removeEventListener('abort', stop) }
+}
 export interface IntentCapabilities { actions: Array<{ action: string; status: string; reason: string }>; write_configured: boolean; planner_available: boolean; observation_available: boolean }
 export type IntentCityTraffic = Omit<ScenarioRequest, 'strategy'> & { strategy: 'none' }
 export interface IntentSubmission { intent_id: string; operation_id: string; status: string; traffic_start_mode?: string; traffic_request_id?: string }

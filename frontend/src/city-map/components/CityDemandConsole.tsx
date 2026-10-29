@@ -23,6 +23,7 @@ export function CityDemandConsole({ phase, onNext }: {
         at: number;
     } | null>(null);
     const [previewing, setPreviewing] = useState(false), [error, setError] = useState('');
+    const [, refreshPreviewClock] = useState(0);
     useEffect(() => {
         controller.current?.abort();
         setPreview(null);
@@ -30,15 +31,43 @@ export function CityDemandConsole({ phase, onNext }: {
         setError('');
         return () => controller.current?.abort();
     }, [fingerprint]);
+    useEffect(() => {
+        if (!preview) return;
+        const timer = window.setTimeout(() => refreshPreviewClock(value => value + 1), Math.max(0, preview.at + 60000 - Date.now()));
+        return () => window.clearTimeout(timer);
+    }, [preview]);
     const total = city.rows.reduce((sum, row) => sum + row.ueCount, 0);
     const allocation = request ? { baselineUes: request.baselineUes, events: request.events, total } : null;
     const acceptsNext = adapter.snapshot?.lifecycle?.canSubmitEvaluation === true;
-    const locked = formal.pending || formal.uncertain || Boolean(adapter.snapshot && !roundIsReleased(adapter.snapshot) && !acceptsNext);
+    const resourcesOwned = Boolean(adapter.snapshot && !roundIsReleased(adapter.snapshot) && !acceptsNext);
+    const locked = formal.pending || formal.uncertain || resourcesOwned;
     const admitted = allocationAdmitted(adapter.snapshot?.capabilities, allocation);
-    const available = formal.caps?.write_configured === true && formal.caps.planner_available === true && formal.caps.observation_available === true;
+    const available = !formal.capLoading && !formal.capError && formal.caps?.write_configured === true && formal.caps.planner_available === true && formal.caps.observation_available === true;
+    const capabilityProblem = formal.capError === 'capabilities_timeout' ? 'AI 能力查詢逾時，請稍後重試。'
+        : formal.capError === 'capabilities_invalid_response' ? 'AI 能力回應格式無效，請重試或檢查後端。'
+        : formal.capError === 'capabilities_http' ? 'AI 能力服務回報錯誤，請稍後重試。'
+        : '無法連線至 AI 能力服務，請確認後端後重試。';
     const validPreview = preview?.key === fingerprint && preview.value.admissible && Date.now() - preview.at < 60000;
-    const canSubmit = Boolean(request && intentText.trim() && formal.controlToken.trim() && validPreview && admitted && available
-        && executionReady && adapter.snapshot?.capabilities.start === true && !locked && !(adapter.blockingError ?? Boolean(adapter.error)));
+    const submitReasons = [
+        !request && '請先在地圖建立並儲存有效的居民需求。',
+        !intentText.trim() && '請填寫服務意圖，說明目標與持續時間。',
+        previewing && '正在重新檢查接入，請稍候。',
+        !previewing && !validPreview && (error ? '接入預覽尚未完成：' + error
+            : preview?.key !== fingerprint ? '尚未預覽目前需求；請先預覽接入與需求。'
+            : !preview.value.admissible ? '接入預覽未通過；請檢查預覽結果並調整需求後重試。'
+            : '接入預覽已超過 60 秒；需求已保留，請重新預覽後開始。'),
+        !admitted && '目前需求尚未符合准入人數或容量限制；請減少 UE 或確認接納能力。',
+        !available && (formal.capLoading ? '正在確認 AI 能力，可繼續編輯需求。' : formal.capError ? capabilityProblem
+            : !formal.caps ? '尚未取得 AI 能力；請重新確認 AI 能力。'
+            : 'AI 尚未就緒：' + [!formal.caps.write_configured && '後端寫入未配置', !formal.caps.planner_available && 'Planner 尚不可用', !formal.caps.observation_available && '觀測服務尚不可用'].filter(Boolean).join('、') + '。'),
+        !executionReady && '網路尚未就緒；請等待網路接入檢查通過。',
+        adapter.snapshot?.capabilities.start !== true && '後端目前尚未開放建立實驗；請確認網路與情境服務狀態。',
+        formal.pending && '正在提交本次需求，請勿重複啟動。',
+        formal.uncertain && '前次提交結果待確認；請先使用「核對原始提交」。',
+        resourcesOwned && '目前實驗仍持有資源；請先結束需求並等待回收完成。',
+        (adapter.blockingError ?? Boolean(adapter.error)) && '情境狀態讀取異常；請待狀態恢復後重試。',
+    ].filter((reason): reason is string => typeof reason === 'string');
+    const canSubmit = submitReasons.length === 0;
     async function inspect() {
         if (!request || previewing)
             return;
@@ -108,6 +137,12 @@ export function CityDemandConsole({ phase, onNext }: {
       </div>}
       {error && <p role="alert" className="text-xs text-red-700">{error}</p>}
     </section>
+    <section aria-label="AI 能力確認" className="space-y-2 text-xs">
+      <button type="button" disabled={formal.capLoading} onClick={formal.refresh} className="min-h-9 rounded border px-3 disabled:opacity-50">{formal.capLoading ? '確認 AI 能力中…' : '重新確認 AI 能力'}</button>
+      {formal.capLoading ? <p role="status" className="text-slate-600">正在確認 AI 能力，可繼續編輯需求。</p>
+          : formal.capError ? <p role="status" className="text-amber-800">{capabilityProblem}</p>
+          : formal.caps && !available && <p role="status" className="text-amber-800">正式 AI 尚不可執行：{[!formal.caps.write_configured && '後端寫入未配置', !formal.caps.planner_available && 'Planner 尚不可用', !formal.caps.observation_available && '觀測服務尚不可用'].filter(Boolean).join('、')}。</p>}
+    </section>
     {phase === 'review' ? <button type="button" disabled={!request} onClick={onNext} className="min-h-11 w-full rounded-xl bg-emerald-700 px-4 py-3 font-bold text-white disabled:opacity-50">{'下一步：意圖與啟動'}</button>
             : <section className="space-y-3 rounded-xl border border-primary-200 bg-white p-4">
         <h3 className="font-bold">{'意圖與啟動'}</h3>
@@ -115,21 +150,12 @@ export function CityDemandConsole({ phase, onNext }: {
         <p className="text-xs">{'QoS 模式：保留要求的原始發送量，不自動縮減。其他策略目前未開放。'}</p>
         <label htmlFor="city-service-intent" className="block text-sm font-semibold">{'服務意圖：目標、有效期間與限制'}</label>
         <textarea id="city-service-intent" maxLength={8000} rows={4} value={intentText} onChange={event => setIntentText(event.target.value)} className="w-full rounded-lg border border-slate-300 p-3 text-sm" placeholder={'描述服務目標、持續時間及允許的調整；地圖位置、UE 與 SLA 將一併送出。'}/>
-        <details className="text-xs">
-          <summary className="cursor-pointer">操作授權</summary>
-          <label className="mt-2 block">操作授權權杖
-            <input type="password" aria-label="操作授權權杖" autoComplete="off" spellCheck={false}
-              value={formal.controlToken} onChange={event => formal.setControlToken(event.target.value)}
-              className="mt-1 block w-full rounded border border-slate-300 p-2"/>
-          </label>
-          <p className="mt-1">僅保留在此頁記憶體；清除或重新載入後須重新輸入。</p>
-          <button type="button" onClick={() => formal.setControlToken('')} className="mt-2 min-h-9 rounded border px-3">清除操作授權</button>
-        </details>
-        {!formal.controlToken.trim() && <p role="status" className="text-xs text-amber-800">請先展開「操作授權」並輸入權杖，才能開始實驗。</p>}
-        <button type="button" onClick={formal.refresh} className="min-h-9 rounded border px-3 text-xs">{'更新正式 AI 能力'}</button>
-        {!available && <p role="status" className="text-xs text-amber-800">{'正式 AI 尚不可執行：需要寫入授權、Planner 與觀測服務。'} {formal.capError}</p>}
-        <button data-testid="scenario-submit" type="button" disabled={!canSubmit} onClick={() => { if (canSubmit && request && preview && Date.now() - preview.at < 60000)
-                void formal.submit(intentText, { ...structuredClone(request), requestId: crypto.randomUUID() }); }} className="min-h-11 w-full rounded-xl bg-primary-700 px-4 py-3 font-bold text-white disabled:opacity-50">{formal.pending ? '提交中…' : '開始實驗'}</button>
+        {!validPreview && <button type="button" data-testid="launch-refresh-preview" disabled={!executionReady || !request || !admitted || locked || previewing} onClick={() => void inspect()} className="min-h-11 w-full rounded-lg border border-emerald-400 px-3">{previewing ? '重新預覽中…' : '重新預覽接入與需求'}</button>}
+        {submitReasons.length > 0 && <div id="city-submit-reasons" data-testid="city-submit-reasons" role="status" className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900"><p className="font-semibold">目前尚不能開始：</p><ul className="mt-1 list-disc space-y-1 pl-4">{submitReasons.map(reason => <li key={reason}>{reason}</li>)}</ul></div>}
+        <button data-testid="scenario-submit" type="button" aria-describedby={submitReasons.length ? 'city-submit-reasons' : undefined} disabled={!canSubmit} onClick={() => {
+            if (!validPreview || !preview || Date.now() - preview.at >= 60000) { refreshPreviewClock(value => value + 1); return; }
+            if (canSubmit && request) void formal.submit(intentText, { ...structuredClone(request), requestId: crypto.randomUUID() });
+        }} className="min-h-11 w-full rounded-xl bg-primary-700 px-4 py-3 font-bold text-white disabled:opacity-50">{formal.pending ? '提交中…' : '開始實驗'}</button>
         {locked && <p role="status" className="text-xs text-amber-800">{'目前輪次仍持有資源或提交結果待確認；草稿可編輯，暫不可啟動。'}</p>}
       </section>}
     {formal.error && <p role="alert" className="text-xs text-red-700">{formal.error}</p>}

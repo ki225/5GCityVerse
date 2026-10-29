@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getIntentOperationDetail, setIntentControlToken } from './intents'
+import { getIntentOperationDetail } from './intents'
 const ID = '82ebb343-2690-43ee-a740-6607d1efaa2a'
 const value = () => ({ operation_id: ID, intent_id: 'intent', status: 'needs_definition', kind: 'reconcile', stage: 'needs_definition', error: { code: 'model_proposal_unavailable', category: 'model', reason: 'provider_unavailable', message: 'never-render-private-body' }, request: { token: 'never-render-private-token' } })
 beforeEach(() => {
@@ -8,17 +8,17 @@ beforeEach(() => {
   vi.stubEnv('VITE_WS_URL', 'ws://127.0.0.1:8000/ws')
 
 })
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); setIntentControlToken(''); vi.unstubAllEnvs() })
-describe('one bounded authorized operation read', () => {
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); vi.unstubAllEnvs() })
+describe('one bounded session-owned operation read', () => {
   it('GETs only the exact operation and returns a bounded safe projection, not private payload', async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify(value())))
-    vi.stubGlobal('fetch', fetch); setIntentControlToken('explicit-unit-credential')
+    vi.stubGlobal('fetch', fetch)
     const result = await getIntentOperationDetail(ID, 'intent')
     expect(result.error_code).toBe('model_proposal_unavailable'); expect(result.readback_reason).toBe('provider_unavailable')
     expect(JSON.stringify(result)).not.toContain('never-render')
     const call = fetch.mock.calls[0] as unknown as [string, RequestInit]
     expect(call[0]).toBe('http://127.0.0.1:8000/api/operations/' + ID)
-    expect(call[1].method).toBeUndefined(); expect(call[1].headers).toHaveProperty('Authorization', 'Bearer explicit-unit-credential')
+    expect(call[1].method).toBeUndefined(); expect(call[1].headers).not.toHaveProperty('Authorization')
     expect(call[1].headers).toHaveProperty('X-CityVerse-Session-Id', 'test-session')
     expect(fetch).toHaveBeenCalledTimes(1)
   })
