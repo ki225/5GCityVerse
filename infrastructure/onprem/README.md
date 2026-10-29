@@ -1,6 +1,91 @@
 # On-prem infrastructure as code
 
-This directory contains only **Helm and Kustomize declarations, values, and four Bash scripts**. `Chart.yaml` depends directly on the official [free5gc-helm](https://github.com/free5gc/free5gc-helm) version `v4.2.2`, chart `1.1.7`; `upstream.lock.yaml` pins the Git revision. It contains no Python renderer, API source ConfigMap, Docker build context, tests, or KVM recovery flow.
+## Shutdown and remove the project network
+
+First stop the owned backend/frontend and resource controllers using the
+[application shutdown guide](../../scripts/onprem/README.md#stop-applications-controllers-and-owned-helpers).
+The following removes the dedicated `free5gc-onprem` deployment and, when
+present and explicitly identified, the project's old isolated device canary.
+It never resets kubeadm, deletes kube-system, prunes Docker or shuts down Ubuntu.
+Run from this repository inside Ubuntu. Reading this deployment's admin
+kubeconfig and root-owned state requires `sudo`.
+
+```bash
+KUBECONFIG_FILE=/etc/kubernetes/admin.conf
+KUBE_CONTEXT="$(sudo kubectl --kubeconfig "$KUBECONFIG_FILE" config current-context)"
+MAIN_UID=$(sudo kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$KUBE_CONTEXT" \
+  get namespace free5gc-onprem --ignore-not-found -o jsonpath='{.metadata.uid}')
+CANARY_UID=$(sudo kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$KUBE_CONTEXT" \
+  get namespace cityverse-device-canary --ignore-not-found -o jsonpath='{.metadata.uid}')
+CANARY_ARGS=()
+if [[ -n "$CANARY_UID" ]]; then CANARY_ARGS=(--canary-uid "$CANARY_UID"); fi
+sudo bash infrastructure/onprem/scripts/teardown.sh \
+  --kubeconfig "$KUBECONFIG_FILE" --context "$KUBE_CONTEXT" \
+  --namespace free5gc-onprem --namespace-uid "${MAIN_UID:-already-absent}" \
+  "${CANARY_ARGS[@]}" --delete-retained-pv-definitions --apply
+sudo bash infrastructure/onprem/scripts/remove-host-network.sh \
+  --kubeconfig "$KUBECONFIG_FILE" --context "$KUBE_CONTEXT" \
+  --disable-autostart --apply
+```
+
+Without `--apply`, both scripts only check scope. `teardown.sh` validates the
+exact namespace UID and `cityverse.io/platform=kubeadm`; the optional canary
+also requires `cityverse.io/managed-by=isolated-device-ran`. It uninstalls only
+Helm releases in that namespace and normally waits for both namespaces to
+disappear. This deployment had no Helm releases; its manually applied resources
+were removed by namespace deletion. An already absent namespace is a safe
+no-op. You can rerun with the UID saved in the before-inventory; the literal
+`already-absent` is accepted only when the main namespace actually does not
+exist, and cannot authorize deletion of a present namespace.
+
+Namespace removal deletes its PVCs. `--delete-retained-pv-definitions` additionally
+removes only project `Retain` local PV API objects after namespace deletion,
+checking PV UID, original claim UID, `Released` state, local path and node
+affinity. **It retains the actual `/var/lib/cityverse-mongodb` and
+`/var/lib/cityverse-af-callback` data directories**, host SQLite DBs, logs, tokens,
+source and test evidence. Recreate the PV/PVC definitions from the deployment
+manifests when installing again; old claimRef UIDs are not left blocking new
+claims. Omit this flag to retain PV definitions, but then explicitly reconcile
+their old claim references before reinstalling.
+
+`remove-host-network.sh` requires both project namespaces absent and refuses
+any remaining NAD that uses a target parent. It checks exactly ten `cv-n2`,
+`cv-n4`, `cv-n3-*`, `cv-n6-*` dummy parents and four `cv-gw-*` ipvlan gateways,
+including gateway parent ifindex, before removal. It leaves primary CNI bridges,
+nonproject network namespaces, global `ip_forward`, untagged Docker forwarding
+rules and unrelated routes intact. Normal Kubernetes CNI deletion removes the
+project Pod networks and their N3 `c170:` qdiscs; the script never erases the
+entire host-local lease directory. Missing target links are a safe no-op.
+
+On this Ubuntu host, the dedicated
+`5gcityverse-secondary-links.service` recreates those links at boot.
+`--disable-autostart` verifies its exact systemd FragmentPath, Description,
+ExecStart, root ownership and lack of requiring units, then disables/stops only
+that unit. This prevents a host restart from recreating the lab links.
+Shared kubelet/containerd/networking units are not masked. To intentionally
+rebuild this existing host, first verify the same unit ownership:
+
+```bash
+sudo systemctl show 5gcityverse-secondary-links.service \
+  -p FragmentPath -p Description -p ExecStart -p RequiredBy
+# Only for the root-owned /etc/systemd/system/5gcityverse-secondary-links.service
+# running /usr/local/sbin/5gcityverse-secondary-links, with no RequiredBy users:
+sudo systemctl enable --now 5gcityverse-secondary-links.service
+```
+
+Then follow the installation guide to restore the project namespace/PVs/network
+workloads. The retained host unit also ensures the pinned control-plane address
+on this particular host; it is not part of a generic physical-site install.
+If the shared API is offline, verify Kubernetes after the original control
+plane is ready; a refused API connection is not evidence that a namespace was
+deleted.
+
+Requirements REQ-T1..T4 and REQ-H1..H3: explicit cluster and UID fencing,
+dedicated namespace scope, retained data and shared CNI protection. The scripts
+use a minimal CLI pattern; `bash -n` and ShellCheck passed after correcting
+SC1007 empty assignments.
+
+This directory contains **Helm and Kustomize declarations, values, Bash deployment/teardown scripts, and a small configuration-only Python node-selector normalizer**. `Chart.yaml` depends directly on the official [free5gc-helm](https://github.com/free5gc/free5gc-helm) version `v4.2.2`, chart `1.1.7`; `upstream.lock.yaml` pins the Git revision. API source, Docker build contexts, and runtime controllers remain under `backend/`.
 
 ## Required configuration
 
@@ -20,30 +105,86 @@ The standard upstream NF and MongoDB templates are reused. In this version, the 
 
 The host environment is Ubuntu with existing kubeadm, primary CNI, Multus, ipvlan/static CNI binaries, compatible gtp5g and SCTP modules, and an available `cityverse-local` StorageClass. UPF hosts need `cityverse.io/gtp5g-ready=true`. Physical deployments must supply corresponding site labels and N2, N3, N4, and N6 networks. MongoDB retains the upstream tini bootstrap; first deployment needs network access for Debian packages.
 
-For a single-node deployment, fill every hostname placeholder in `values-single-node.example.yaml`. Only a single-node simulation may run `sudo bash scripts/host-network.sh --apply`; this is no substitute for physical VLANs.
+1. Render the default Ubuntu single-node configuration:
 
 ```bash
-git clone --depth 1 --branch v4.2.2 https://github.com/free5gc/free5gc-helm.git /tmp/free5gc-helm
-bash infrastructure/onprem/scripts/render.sh \
-  --upstream /tmp/free5gc-helm --values /path/to/site-values.yaml \
-  --output /path/to/new-render-directory
+bash infrastructure/onprem/scripts/render.sh
 ```
 
-Omit `--values` for physical-site mode. The script checks the revision and clean working tree, strict lint, identical results from two renders, and Kustomize. It outputs `runtime.yaml`, `Chart.lock`, and a chart package. Rendering neither connects to the cluster nor runs Python.
+The script reads `value.yaml`, resolves the local `hostname -s` without
+querying Kubernetes, and downloads the exact `upstream.lock.yaml` revision into
+`${XDG_CACHE_HOME:-$HOME/.cache}/5gcityverse/free5gc-helm/<revision>` on its first
+run. Later runs reuse this cache; dirty or mismatched checkouts are rejected,
+never reset. Output is printed and saved under a new `.tmp/onprem-render/` run
+directory each time; previous output is retained.
+
+2. Optional: override a target hostname or use your own values:
+
+```bash
+bash infrastructure/onprem/scripts/render.sh --hostname my-kubernetes-node
+bash infrastructure/onprem/scripts/render.sh --upstream /path/to/clean/free5gc-helm \
+  --values /path/to/site-values.yaml --output /path/to/new-render-directory
+```
+
+`--values` replaces the Ubuntu overlay: precedence is chart `values.yaml`, then
+each supplied file in CLI order (last wins). Thus explicit values retain the
+existing physical-site deployment workflow. `--hostname` is only for the default
+Ubuntu overlay and cannot combine with `--values`. The local hostname must match the
+Kubernetes node's `kubernetes.io/hostname` label; use `--hostname` if it differs.
+All logical sites are colocated on that one node; no extra physical capacity is
+created. Only a single-node simulation may run `sudo bash
+infrastructure/onprem/scripts/host-network.sh --apply`; this does not replace
+physical VLANs.
+
+The script checks the revision and clean working tree, strict lint, identical
+results from two renders, and Kustomize. It outputs `runtime.yaml`, `Chart.lock`,
+a chart package, `render-settings.yaml`, and the selected `values-01.yaml`
+(additional files numbered in CLI order). Rendering neither connects to the
+cluster. It requires Git, Helm, kubectl (local Kustomize only), Python 3 with
+PyYAML, and standard Ubuntu shell utilities; rendering alone does not install the
+required CNI, kernel modules, storage class, host links or images.
 
 ## Installation
+
+Before Helm, provision the native API credentials, UPF/RAN evidence source and retained
+host directories using the backend virtualenv described in the startup guide:
+
+```bash
+sudo "$HOME/.venvs/5gcityverse-onprem/bin/python" -m backend.onprem.operations.deployment.native_runtime --apply
+```
+
+The command defaults to `/etc/kubernetes/admin.conf`, its current context, the
+local hostname, and private state `/var/lib/cityverse/operator-native`. It does
+not create UEs or traffic. Existing private tokens and MongoDB data are retained;
+Helm owns the MongoDB PV definition. For another cluster, pass `--kubeconfig`,
+`--context` and `--node` explicitly. Keep its generated private
+`bootstrap-values.json` as the last Helm values file so the source revision
+triggers an evidence-sidecar rollout after source updates.
+
+On this WSL host, `fs.inotify.max_user_instances=128` exhausted the root user's
+watch instances and made the existing kube-proxy fail with `too many open files`.
+The commissioned prerequisite is `1024`, retained in
+`/etc/sysctl.d/90-5gcityverse-inotify.conf`. Diagnose that exact failure before
+changing a different host's limits; a successful Helm install does not prove
+the Kubernetes Service IP or Multus networking is working.
 
 Review the diff, then deploy with explicit kubeconfig, context, and namespace:
 
 ```bash
-kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n free5gc-onprem \
+sudo kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n free5gc-onprem \
   apply --dry-run=server -f /path/to/render/runtime.yaml
-helm upgrade --install cityverse /path/to/render/cityverse-onprem-0.2.0.tgz \
+sudo helm upgrade --install cityverse /path/to/render/cityverse-onprem-0.2.0.tgz \
   --kubeconfig "$KUBECONFIG" --kube-context "$CONTEXT" -n free5gc-onprem \
-  --create-namespace -f /path/to/site-values.yaml \
+  --create-namespace -f /path/to/render/values-01.yaml \
+  -f /var/lib/cityverse/operator-native/bootstrap-values.json \
   --post-renderer infrastructure/onprem/scripts/post-render.sh
-kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" label namespace free5gc-onprem cityverse.io/platform=kubeadm --overwrite
+sudo kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" label namespace free5gc-onprem cityverse.io/platform=kubeadm --overwrite
 ```
+
+For multiple `--values` files, pass every generated `values-NN.yaml` to Helm in
+the same order. Use the release and namespace from `render-settings.yaml` if
+you overrode them. The chart package retains the physical base defaults, so
+the generated overlay must also be passed at installation.
 
 Before adopting manually deployed NFs or custom images, review Helm ownership, Pod specs, PVCs, and image differences. This directory cleanup did not redeploy or overwrite live NFs. The backend manages its observer, callback, capture, subscriber provisioning, and UE lifecycle; they are not embedded in this chart.
 

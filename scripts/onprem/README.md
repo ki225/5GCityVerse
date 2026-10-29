@@ -1,5 +1,52 @@
 # On-prem launchers
 
+## Stop applications, controllers and owned helpers
+
+Run in Ubuntu/WSL. Use the actual launcher's state path; the isolated live run
+uses `.tmp/live-ai-e2e-20261029/runtime.json`. Complete any owned UE/traffic
+release before stopping a backend you intend to retain. Namespace teardown
+below removes the complete network deployment instead.
+
+```bash
+# This deployment's state/controller files are root-owned, hence sudo.
+sudo bash scripts/onprem/stop-resource-controllers.sh \
+  --state-file "$HOME/.local/state/5gcityverse/controller-processes.json" \
+  --workspace "$PWD" --apply
+sudo bash scripts/onprem/stop-onprem.sh \
+  --state-file .tmp/live-ai-e2e-20261029/runtime.json
+```
+
+`stop-resource-controllers.sh` defaults to a read-only identity check without
+`--apply`. It verifies boot ID, PID/start ticks/process group, exact controller
+module, workspace and port, then sends normal termination with a bounded grace
+period. It marks the private controller record stopped and retains all
+configuration, credentials and journals. The normal launcher stop removes its
+active runtime record; logs and databases remain. Use `sudo` when the original
+launcher/state belongs to root; otherwise use its original owner.
+
+Extra native forwards are in the native supervisor's group and stop with it.
+An independently launched project Python monitor/WSL keeper can be stopped
+only with its original identity record and exact script:
+
+```bash
+sudo bash scripts/onprem/stop-owned-helper.sh \
+  --pid "$HELPER_PID" --start-ticks "$HELPER_START_TICKS" \
+  --boot-id "$HELPER_BOOT_ID" --workspace "$PWD" \
+  --script "$HELPER_SCRIPT" --apply
+```
+
+Do not populate these values with a process-name scan or reuse an old PID after
+a reboot. The helper refuses changed process identity, another workspace and
+browser drivers. Close a dedicated test browser through its own driver control
+channel; do not close unrelated Chrome sessions.
+
+These stops do not remove Kubernetes resources. Continue with the explicit
+[network teardown and host-link cleanup](../../infrastructure/onprem/README.md#shutdown-and-remove-the-project-network).
+No `pkill python/node`, Docker prune, kubeadm reset or WSL shutdown is involved.
+
+Requirements REQ-S1/S2 and REQ-P1 are implemented in the new stop scripts.
+They use a minimal CLI pattern; `bash -n` and system ShellCheck passed.
+
 ## Current native kubeadm runtime
 
 The current native evidence/UE workflow uses `start_native_backend.py` against
