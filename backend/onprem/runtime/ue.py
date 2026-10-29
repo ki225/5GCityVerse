@@ -619,23 +619,33 @@ class UEController:
         if getattr(self, "_startup_quarantined", False) or (guard is not None and guard()):
             raise EvidenceUnavailable("Durable UE retirement quarantine blocks controller mutation")
 
-    async def reserve(self,counts,*,owner_id,operation_id,request_id,network_scope,valid_until,profile):
+    async def reserve(self,counts,*,owner_id,operation_id,request_id,network_scope,valid_until,profile=None,launch_contract=None):
         """Observe an empty fleet, then hold identities without a runnable generation."""
         from .ue_reservation import HeldUERepository,UEAdmissionLaunchProfile
         async with self._lock:
             self._assert_startup_not_quarantined()
-            if type(profile) is not UEAdmissionLaunchProfile or self.driver is None:
+            if launch_contract is not None and getattr(self.driver,'backend',None)!='free-ran-ue':
+                raise EvidenceUnavailable('current_ue_launch_contract_requires_free_ran')
+            if getattr(self.driver,'backend',None)=='free-ran-ue':
+                from .current_launch import current_device_launch_contract
+                current_contract=current_device_launch_contract(self.driver)
+                if launch_contract is not None and launch_contract!=current_contract:
+                    raise EvidenceUnavailable('current_ue_launch_contract_changed')
+                # Archived profiles are diagnostic inputs only on this path.
+                launch_contract,profile=current_contract,None
+            if self.driver is None or (launch_contract is None and type(profile) is not UEAdmissionLaunchProfile):
                 raise EvidenceUnavailable('needs_measurement:commissioned_ue_launch_profile_missing')
+            launch=launch_contract or profile
             import importlib
             source=getattr(importlib.import_module(type(self.driver).__module__),'CONFIG_INIT',None)
             actual_digest=getattr(self.driver,'reservation_configuration_digest',None)
             actual_digest=actual_digest or (hashlib.sha256(source.encode()).hexdigest() if isinstance(source,str) else None)
             image=getattr(self.driver,'image','').split('@')[-1]
-            if actual_digest!=profile.configuration_digest or image!=profile.image_digest:
+            if actual_digest!=launch.configuration_digest or image!=launch.image_digest:
                 raise EvidenceUnavailable('needs_measurement:ue_launch_profile_differs_from_driver')
-            if profile.device_sessions:
+            if launch.device_sessions:
                 device_profile=getattr(self.driver,'device_profile',None)
-                if device_profile is None or device_profile.driver!=getattr(self.driver,'backend','ueransim') or device_profile.image_digest!=image or any(len(rows)>device_profile.maximum_sessions for _,rows in profile.device_sessions):
+                if device_profile is None or device_profile.driver!=getattr(self.driver,'backend','ueransim') or device_profile.image_digest!=image or any(len(rows)>device_profile.maximum_sessions for _,rows in launch.device_sessions):
                     raise EvidenceUnavailable('needs_measurement:multi_session_driver_profile_missing')
             current=self.store.current()
             if current and (current['allocation'] or any(current['desired'].values())):
@@ -644,12 +654,14 @@ class UEController:
             observed=self.verifier.evaluate(current or self._bootstrap,evidence)
             if observed.get('status')!='stopped' or observed.get('errors') or observed.get('perUe'):
                 raise EvidenceUnavailable('needs_measurement:fresh_empty_native_fleet_required')
+            if launch_contract is not None and not ran_connected(observed):
+                raise EvidenceUnavailable('needs_measurement:fresh_core_ran_evidence_required')
             if current:
                 self.store.save(observed)
             else:
                 self._bootstrap_result=observed
             return HeldUERepository(self.store).reserve(counts,owner_id=owner_id,operation_id=operation_id,
-                request_id=request_id,network_scope=network_scope,valid_until=valid_until,profile=profile,
+                request_id=request_id,network_scope=network_scope,valid_until=valid_until,profile=profile,launch_contract=launch_contract,
                 runtime_policy_digest=getattr(self.driver, 'runtime_policy_digest', ''))
 
     async def request(self, counts, *, expected_generation=None, admission_guard=None,reservation=None,spatial_request=None):
@@ -874,13 +886,21 @@ class UEController:
             return result
 
     async def reserve_population(self,add_counts,remove_device_ids,*,lease,expected_population_revision,
-                                 operation_id,profile,idempotency_key,valid_until,replacement_constraint=None):
+                                 operation_id,profile=None,idempotency_key,valid_until,replacement_constraint=None):
         from .population import PopulationRuntime,PopulationRepository
         async with self._lock:
             self._assert_startup_not_quarantined()
             self.store.assert_no_active_exceptional()
             from .ue_reservation import UEAdmissionLaunchProfile
-            if type(profile) is not UEAdmissionLaunchProfile:
+            from .current_launch import CurrentDeviceLaunchContract,current_device_launch_contract
+            if type(profile) is CurrentDeviceLaunchContract and getattr(self.driver,'backend',None)!='free-ran-ue':
+                raise EvidenceUnavailable('current_population_launch_contract_requires_free_ran')
+            if getattr(self.driver,'backend',None)=='free-ran-ue' and replacement_constraint is None:
+                current_contract=current_device_launch_contract(self.driver)
+                if type(profile) is CurrentDeviceLaunchContract and profile!=current_contract:
+                    raise EvidenceUnavailable('current_population_launch_contract_changed')
+                profile=current_contract
+            if type(profile) not in (UEAdmissionLaunchProfile,CurrentDeviceLaunchContract):
                 raise EvidenceUnavailable('typed_population_profile_required')
             if self.driver is None or getattr(self.driver,'device_profile',None) is None:
                 raise EvidenceUnavailable('v2_device_population_driver_required')

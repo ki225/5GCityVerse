@@ -39,6 +39,8 @@ async def execution_admission(context, bootstrap):
         'mode': 'baseline-device-reservation', 'state': 'unavailable',
         'observedAt': timestamp(now), 'validUntil': timestamp(now),
         'coreRanReady': False, 'nativeFleetEmpty': False, 'profileValid': False,
+        'profileRequired': False, 'launchContractReady': False,
+        'reasonCode': 'baseline_not_absent',
         'existingUePduReady': False, 'serviceEffectVerified': False}
     if bootstrap.get('state') != 'absent' or bootstrap.get('stage') != 'ue':
         return result
@@ -47,13 +49,19 @@ async def execution_admission(context, bootstrap):
         preparer = getattr(service, 'pre_traffic_admission', None)
         capabilities = getattr(preparer, 'capabilities', None)
         if not callable(capabilities):
+            result['reasonCode'] = 'baseline_admission_not_configured'
             return result
         caps = await capabilities()
-        valid_until = caps.get('profile_valid_until')
+        result['profileValid'] = caps.get('profile_valid') is True  # Diagnostic only.
         if (caps.get('configured') is not True or caps.get('mode') != result['mode']
-                or caps.get('profile_valid') is not True or caps.get('changes_selection') is not False
-                or type(valid_until) not in (int, float) or valid_until <= now):
+                or caps.get('profile_required') is not False
+                or caps.get('launch_contract_ready') is not True
+                or caps.get('launch_contract_source') != 'current-server-free-ran-config/v1'
+                or caps.get('changes_selection') is not False):
+            result['reasonCode'] = caps.get('reason_code') or 'current_launch_contract_unavailable'
             return result
+        result['launchContractReady'] = True
+        result['reasonCode'] = 'fresh_stopped_fleet_required'
         controller = context.ue_controller
         status = controller.status()
         if (status.get('status') != 'stopped' or status.get('errors') or status.get('perUe') != []
@@ -65,16 +73,21 @@ async def execution_admission(context, bootstrap):
         if current is None or current.get('allocation') != [] or any(current.get('desired', {}).values()):
             return result
         if context.bootstrap_blocker() or controller.mutation_blocker({'embb': 1, 'urllc': 0, 'mmtc': 0, 'v2x': 0}):
+            result['reasonCode'] = 'runtime_mutation_blocked'
             return result
         raw = await asyncio.to_thread(controller.adapter.observe, current['generation'])
         now = time.time()
         if not empty_native_snapshot(raw, current['generation'], now):
+            result['reasonCode'] = 'fresh_global_empty_inventory_required'
             return result
+        result['nativeFleetEmpty'] = True
         # A separate verifier cannot reset the live controller's stability clock.
         verifier = EvidenceVerifier(max_age=15, stable_seconds=0, endpoints=controller.verifier.endpoints)
         verified = verifier.evaluate(current, raw, now=now)
         if verified.get('status') != 'stopped' or verified.get('errors') or not ran_connected(verified, now):
+            result['reasonCode'] = 'fresh_core_ran_evidence_required'
             return result
+        result['reasonCode'] = 'commissioned_spatial_gnb_evidence_required'
         # Include every configured spatial gNB, rather than only one per slice.
         expected_endpoints = tuple(getattr(getattr(getattr(controller, 'driver', None), 'device_profile', None), 'commissioned_gnb_endpoints', ()))
         observed_endpoints = []
@@ -90,20 +103,22 @@ async def execution_admission(context, bootstrap):
                     return result
         if len(observed_endpoints) != len(set(observed_endpoints)) or set(observed_endpoints) != set(expected_endpoints):
             return result
+        result['coreRanReady'] = True
+        result['reasonCode'] = 'native_generation_changed'
         latest = controller.store.current()
         if (latest is None or latest.get('generation') != current['generation']
                 or latest.get('allocation') != [] or latest.get('desired') != current.get('desired')
                 or population_revision(latest) != population_revision(current)
                 or context.bootstrap_blocker()):
             return result
-        # The source snapshot and commissioned profile independently bound this hint.
-        until = min(now + 5, valid_until,
+        # Only fresh native observations bound this short-lived readiness hint.
+        until = min(now + 5,
                     *(seconds(row['observedAt']) + 15 for row in raw['sources'].values() if row.get('available') is True))
         if until <= now:
             return result
         result.update(state='ready_to_start', observedAt=timestamp(now), validUntil=timestamp(until),
-            generation=current['generation'], coreRanReady=True, nativeFleetEmpty=True, profileValid=True)
+            generation=current['generation'], reasonCode=None)
     except Exception:
         # Missing/stale/changed evidence is unavailable, never a native readiness claim.
-        pass
+        result['reasonCode'] = 'native_admission_evidence_unavailable'
     return result

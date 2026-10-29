@@ -248,7 +248,10 @@ class PopulationRepository:
         from backend.onprem.scenarios.intent_traffic import ServiceIntentTrafficLease
         if type(lease) is not ServiceIntentTrafficLease or not lease.active(self.clock()):
             raise ContractError('active_typed_population_lease_required')
-        if type(profile) is not UEAdmissionLaunchProfile or not profile.device_sessions or profile.valid_until <= self.clock():
+        from .current_launch import CurrentDeviceLaunchContract
+        current_contract=type(profile) is CurrentDeviceLaunchContract
+        if (not current_contract and (type(profile) is not UEAdmissionLaunchProfile or profile.valid_until <= self.clock())
+                or not profile.device_sessions):
             raise ContractError('commissioned_device_population_profile_required')
         counts = validate_counts(add_counts)
         if replacement_constraint is not None:
@@ -268,7 +271,8 @@ class PopulationRepository:
         if type(expected_population_revision) is not int or expected_population_revision < 0:
             raise ContractError('invalid_population_revision')
         required(operation_id, 'operation_id'); required(idempotency_key, 'idempotency_key')
-        expiry = min(float(valid_until), lease.valid_until, profile.valid_until)
+        expiry = min(float(valid_until), lease.valid_until,
+            *(() if current_contract else (profile.valid_until,)))
         if not self.clock() < expiry:
             raise ContractError('expired_population_reservation')
         from backend.onprem.scenarios.intent_traffic import lease_identity

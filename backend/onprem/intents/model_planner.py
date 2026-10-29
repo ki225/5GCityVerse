@@ -352,13 +352,13 @@ class CapacityPolicyValidator:
             bounds[direction + '_max_bps'] = finite(maximum,'maximum native rate') * 1000
         return QoSPolicyClaim.from_validated_action(intent_id=intent.intent_id,revision=intent.revision,session_key=session_key,action=action,allocation_authority='pinned:'+intent.resource_budget_id,**bounds)
 
-    def materialize_native_parameters(self, request):
+    def materialize_native_parameters(self, request, native_anchor=None):
         from .native_resource_policy import materialize_native_parameters
         policy = self.targets.get((request.action, request.target_id))
         if policy is None or not policy.server_parameter_names:
             return request
         return materialize_native_parameters(request, policy.server_parameter_names,
-            self.registry.get(request.action).provider)
+            self.registry.get(request.action).provider, native_anchor)
 
     def context(self, intent, snapshot, membership, validated_plan_ids=frozenset()):
         budget = self.budgets.get(intent.resource_budget_id)
@@ -411,10 +411,10 @@ class CapacityPolicyValidator:
                 if any(sum(predicted[k].values())<sum(offered_all[k].values())*objective.target/100 for k in predicted if k in matching):
                     raise PlanningError('qos_effective_rate_below_explicit_objective')
 
-    def validate(self, candidate, intent, snapshot, membership,*,reserved_identities=frozenset()):
-        return self._validate(candidate,intent,snapshot,membership,reserved_identities=reserved_identities)
+    def validate(self, candidate, intent, snapshot, membership,*,reserved_identities=frozenset(),native_anchor=None):
+        return self._validate(candidate,intent,snapshot,membership,reserved_identities=reserved_identities,native_anchor=native_anchor)
 
-    def _validate(self, candidate, intent, snapshot, membership,*,reserved_identities=frozenset(),operator_reduction=False):
+    def _validate(self, candidate, intent, snapshot, membership,*,reserved_identities=frozenset(),operator_reduction=False,native_anchor=None):
         from .actuators import ActionRequest
         now = self.clock()
         qos_keys={key for a in candidate.actions if a.kind=='update_qos' for key in a.session_keys}
@@ -436,6 +436,12 @@ class CapacityPolicyValidator:
             policy = self.targets.get((action.kind, action.target_id))
             if policy is None or policy.preserves_guarantees is not True:
                 raise PlanningError("target_guarantees_not_authorized")
+            if policy.server_parameter_names:
+                from .native_resource_policy import NativeOperationAnchor
+                if type(native_anchor) is not NativeOperationAnchor or native_anchor.intent_id != intent.intent_id:
+                    raise PlanningError('native_operation_anchor_required')
+                if snapshot.traffic_request_id != native_anchor.traffic_request_id:
+                    raise PlanningError('native_operation_anchor_observation_changed')
             parameters = _flatten(action.parameters)
             if reserved_identities and action.kind=='assign_sessions':
                 parameters.pop('pending_admissions',None)
@@ -526,6 +532,8 @@ class CapacityPolicyValidator:
                 action = replace(action, parameters=dict(action.parameters) | {'impacted_service_ids': sorted(services)})
             validated_actions.append(action)
             request = ActionRequest(action.kind, action.target_id, intent.intent_id, candidate.plan_id + ":" + action.action_id, action.expected_version, dict(action.parameters), action.session_keys)
+            if policy.server_parameter_names:
+                request = replace(request, operation_id=native_anchor.operation_id)
             version_source,node_source = staged_precondition(candidate,action)
             if version_source or node_source:
                 # Static authority, budget and calibration were checked above. Dynamic native
@@ -556,7 +564,7 @@ class CapacityPolicyValidator:
                     self.registry.preflight(replace(child,expected_version=child_before['version']))
                 checks = {'before':before,'checks':{'exact_sessions':len(action.session_keys)}}
             else:
-                request = self.materialize_native_parameters(request)
+                request = self.materialize_native_parameters(request,native_anchor)
                 checks = self.registry.preflight(request)
             if not isinstance(checks, dict) or not checks.get("before") or "checks" not in checks:
                 raise PlanningError("native_preflight_evidence_missing")
@@ -605,7 +613,8 @@ class ValidatedResourcePlanner:
                     if violations:
                         raise PlanningError('placement_constraints:' + ','.join(violations))
                 with phase('native_validation_seconds'):
-                    valid.append(await asyncio.to_thread(self.validator.validate, candidate, intent, snapshot, membership))
+                    valid.append(await asyncio.to_thread(self.validator.validate, candidate, intent, snapshot, membership,
+                        native_anchor=options.get('_native_operation_anchor')))
             except MeasurementRequired:
                 raise
             except PlanningError as error:

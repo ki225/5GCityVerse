@@ -10,6 +10,7 @@ import time
 from .domain import ContractError
 from .pending_admission import PreparedSessionAdmissions
 from backend.onprem.runtime.ue_reservation import HeldUERepository, UEAdmissionLaunchProfile
+from backend.onprem.runtime.current_launch import current_device_launch_contract
 
 
 class BaselineDeviceAdmissionPreparer:
@@ -22,18 +23,29 @@ class BaselineDeviceAdmissionPreparer:
 
     async def capabilities(self):
         from .service import invoke
-        profile = await invoke(self.profile_reader, {}) if self.profile_reader else None
+        try:
+            profile = await invoke(self.profile_reader, {}) if self.profile_reader else None
+        except Exception:
+            profile = None  # Archived measurement is diagnostic, never launch authority.
         driver = getattr(self.controller, 'driver', None)
-        ready = (type(profile) is UEAdmissionLaunchProfile
+        historical_valid = (type(profile) is UEAdmissionLaunchProfile
             and profile.source == 'native-ue-device-launch-profile/v2'
             and bool(profile.device_sessions) and self.clock() < profile.valid_until
             and getattr(driver, 'backend', None) == 'free-ran-ue'
             and getattr(driver, 'reservation_configuration_digest', None) == profile.configuration_digest
             and getattr(driver, 'image', '').split('@')[-1] == profile.image_digest)
+        try:
+            current_device_launch_contract(driver)
+            ready, reason = True, None
+        except ContractError as error:
+            ready, reason = False, str(error)
         return {'configured': True, 'mode': 'baseline-device-reservation',
-            'profile_valid': ready, 'changes_selection': False,
-            'profile_valid_until': profile.valid_until if ready else None,
-            'source': 'commissioned-device-launch-profile', 'service_effect_verified': False}
+            'profile_required': False, 'launch_contract_ready': ready,
+            'launch_contract_source': 'current-server-free-ran-config/v1',
+            'profile_valid': historical_valid, 'changes_selection': False,
+            'profile_valid_until': profile.valid_until if historical_valid else None,
+            'reason_code': reason, 'source': 'current-server-free-ran-config/v1',
+            'service_effect_verified': False}
 
     async def __call__(self, intent, body, operation_id, *, owner):
         from .service import invoke
@@ -44,14 +56,10 @@ class BaselineDeviceAdmissionPreparer:
         valid = validate_scenario_request(body, allow_none=True)
         if valid['strategy'] != 'none':
             raise ContractError('baseline_device_requires_formal_none_traffic')
-        profile = await invoke(self.profile_reader, valid) if self.profile_reader else None
-        if (type(profile) is not UEAdmissionLaunchProfile
-                or profile.source != 'native-ue-device-launch-profile/v2'
-                or not profile.device_sessions or self.clock() >= profile.valid_until):
-            raise ContractError('needs_measurement:commissioned_device_launch_profile_missing_or_expired')
         driver = getattr(self.controller, 'driver', None)
         if getattr(driver, 'backend', None) != 'free-ran-ue':
             raise ContractError('baseline_device_requires_free_ran_ue_driver')
+        launch_contract = current_device_launch_contract(driver)
         # UEController.reserve independently checks current native empty fleet,
         # exact image/compiler digest, mutation fences and the durable hold CAS.
         from backend.onprem.runtime.errors import EvidenceUnavailable
@@ -59,7 +67,7 @@ class BaselineDeviceAdmissionPreparer:
             held = await self.controller.reserve(slice_counts(valid), owner_id=owner,
                 operation_id=operation_id, request_id=valid['requestId'],
                 network_scope=self.network_scope,
-                valid_until=min(intent.valid_until, profile.valid_until), profile=profile)
+                valid_until=intent.valid_until, launch_contract=launch_contract)
         except EvidenceUnavailable as error:
             from .reservation_diagnostic import annotate
             annotate(error)
@@ -89,7 +97,10 @@ def configured_baseline_device_admission(context, config, authority):
     if getattr(context, 'intent_pre_traffic_admission', None) is not None:
         raise ContractError('baseline_device_cannot_replace_configured_pretraffic_admission')
     profile_data = config.get('ue_launch_profile')
-    profile = UEAdmissionLaunchProfile.from_dict(profile_data) if profile_data else None
+    try:
+        profile = UEAdmissionLaunchProfile.from_dict(profile_data) if profile_data else None
+    except (ContractError, TypeError, ValueError):
+        profile = None
     return BaselineDeviceAdmissionPreparer(context.ue_controller,
         profile_reader=lambda _body: profile, authority=authority,
         network_scope=config.get('session_inventory', {}).get('network_scope', ''))

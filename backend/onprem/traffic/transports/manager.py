@@ -15,6 +15,7 @@ import time
 from backend.onprem.policy.errors import PolicyBlocked
 from backend.onprem.runtime.traffic_manager import LEGACY_TRAFFIC_IMAGE, PORT
 from backend.onprem.traffic.worker import command as worker_command
+from .manager_credentials import traffic_manager_token
 
 
 def _discard_connection(entry):
@@ -304,8 +305,7 @@ class TrafficManagerTransport:
         if len(containers) != 1 or len(statuses) != 1:
             raise PolicyBlocked('Traffic manager container is ambiguous')
         container, status = containers[0], statuses[0]
-        auth = [e.get('value') for e in container.get('env', [])
-                if e.get('name') == 'CITYVERSE_TRAFFIC_MANAGER_TOKEN']
+        auth = [traffic_manager_token(container, meta.get('namespace'))]
         try:
             address = ipaddress.ip_address(pod['status']['podIP'])
         except (ValueError, KeyError, TypeError):

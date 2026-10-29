@@ -463,6 +463,9 @@ class ScenarioPopulationAdapter:
                 profile = await _call(self.profile_reader, intent=intent, lease=lease)
                 replacement_reader=getattr(self,'replacement_reader',None)
                 replacement=await _call(replacement_reader,intent=intent,lease=lease,operation_id=operation_id) if callable(replacement_reader) else None
+                replacement_profile_reader=getattr(self,'replacement_profile_reader',None)
+                if replacement is not None and callable(replacement_profile_reader):
+                    profile=await _call(replacement_profile_reader,intent=intent,lease=lease)
                 lease = await asyncio.to_thread(current_authority, self.ledger, lease, operation_id)
                 await asyncio.to_thread(reservation_dispatch,self.ledger,lease,operation_id)
                 delta = await self.controller.reserve_population(record['request']['add_counts'], record['request']['remove_device_ids'],

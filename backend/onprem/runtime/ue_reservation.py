@@ -203,16 +203,24 @@ class HeldUERepository:
         if current and current.active(time.time() if now is None else now):
             raise ContractError('held_ue_reservation_owns_allocation')
 
-    def reserve(self,counts,*,owner_id,operation_id,request_id,network_scope,valid_until,profile,runtime_policy_digest=''):
+    def reserve(self,counts,*,owner_id,operation_id,request_id,network_scope,valid_until,profile=None,launch_contract=None,runtime_policy_digest=''):
         from .ue import validate_counts,allocate
         counts=validate_counts(counts)
         now=self.clock()
-        if type(profile) is not UEAdmissionLaunchProfile or not now<profile.valid_until:
-            raise ContractError('needs_measurement:commissioned_ue_launch_profile_missing')
-        ids=dict(profile.session_ids)
+        from .current_launch import CurrentDeviceLaunchContract
+        if launch_contract is not None:
+            if type(launch_contract) is not CurrentDeviceLaunchContract or profile is not None:
+                raise ContractError('typed_current_launch_contract_required')
+            launch, launch_id = launch_contract, launch_contract.contract_id
+            expiry=timestamp(valid_until)  # The operation/hold TTL, never a fabricated profile TTL.
+        else:
+            if type(profile) is not UEAdmissionLaunchProfile or not now<profile.valid_until:
+                raise ContractError('needs_measurement:commissioned_ue_launch_profile_missing')
+            launch, launch_id = profile, profile.profile_id
+            expiry=min(timestamp(valid_until),profile.valid_until)
+        ids=dict(launch.session_ids)
         if any(n and name not in ids for name,n in counts.items()):
             raise ContractError('needs_measurement:ue_profile_session_id_missing')
-        expiry=min(timestamp(valid_until),profile.valid_until)
         if expiry<=now or not any(counts.values()):
             raise ContractError('invalid_reservation_demand_or_validity')
         with self.store.connect() as db:
@@ -225,7 +233,7 @@ class HeldUERepository:
             same=previous and (previous.owner_id,previous.operation_id,previous.request_id)==(owner_id,operation_id,request_id)
             if same and previous.state in {'held','consumed'}:
                 if (dict(previous.counts)!=counts or previous.network_scope!=network_scope
-                        or previous.launch_profile_id!=profile.profile_id or previous.runtime_policy_digest != runtime_policy_digest):
+                        or previous.launch_profile_id!=launch_id or previous.runtime_policy_digest != runtime_policy_digest):
                     raise ContractError('reservation_idempotency_conflict')
                 if previous.state=='consumed' or previous.active(now):
                     return previous
@@ -235,10 +243,10 @@ class HeldUERepository:
             if current and (current['allocation'] or any(current['desired'].values()) or current['result'].get('status')!='stopped'):
                 raise ContractError('empty_native_generation_required_for_pretraffic_reservation')
             devices=()
-            if profile.device_sessions:
+            if launch.device_sessions:
                 from .device_sessions import DeviceAllocation
-                catalog=dict(profile.device_sessions)
-                pdu_ids={(group,name):pdu for group,name,pdu in profile.device_session_ids}
+                catalog=dict(launch.device_sessions)
+                pdu_ids={(group,name):pdu for group,name,pdu in launch.device_session_ids}
                 if any(n and group not in catalog for group,n in counts.items()):
                     raise ContractError('commissioned_device_catalog_group_missing')
                 devices=tuple(DeviceAllocation('device-'+r['supi'],r['supi'],r['credentialGroup'],r['slice'],network_scope,catalog[r['slice']]) for r in allocate(counts))
@@ -249,7 +257,7 @@ class HeldUERepository:
             data=dict(reservation_id=str(uuid4()),version='new',owner_id=owner_id,operation_id=operation_id,
                 request_id=request_id,network_scope=network_scope,counts=tuple(counts.items()),allocation=[asdict(r) for r in rows],
                 baseline_generation=current['generation'] if current else 0,valid_until=expiry,state='held',
-                created_at=now,consumed_generation=None,launch_profile_id=profile.profile_id,devices=[d.to_dict() for d in devices],
+                created_at=now,consumed_generation=None,launch_profile_id=launch_id,devices=[d.to_dict() for d in devices],
                 runtime_policy_digest=runtime_policy_digest)
             return self._save(db,data)
 

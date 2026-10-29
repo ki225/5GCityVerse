@@ -44,6 +44,7 @@ def configure_service_routes(context, config, providers):
         values['session_targets'])
     registry = ServiceRouteRegistry(path, native_reader=providers['applications'].api.endpoint, session_reader=reader)
     registry.current_snapshot_reader = context.round_ledger.live_snapshot
+    registry.current_ownership_reader = getattr(context.round_ledger, 'intent_traffic_lease', None)
     registry.application_activity_reader = providers['applications'].api.inspect
     context.intent_service_routes = registry
     resources = CurrentRouteResources(context, registry)

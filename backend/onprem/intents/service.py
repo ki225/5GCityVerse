@@ -207,9 +207,70 @@ class IntentService:
         await self._record(request.operation_id,admission_materializations=durable)
         return materialized
 
-    async def _materialize_native_parameters(self, request):
+    async def _native_operation_anchor(self, operation_id, owner, actions, *, allow_capture=True):
+        """Pin only the repository's original operation traffic to native scope."""
+        validator = getattr(self.planner, 'validator', None)
+        policies = getattr(validator, 'targets', {})
+        selected = [action for action in actions if getattr(policies.get((action.kind, action.target_id)),
+            'server_parameter_names', ())]
+        if not selected:
+            return None
+        from .native_resource_policy import NativeOperationAnchor, native_snapshot_reader
+        operation = await invoke(self.repository.operation, operation_id, owner)
+        expected = operation.get('expected_traffic_request_id')
+        if not expected:
+            raise ContractError('native_operation_original_traffic_anchor_required')
+        saved = operation.get('native_resource_anchor')
+        if saved:
+            anchor = NativeOperationAnchor(**saved)
+        else:
+            if not allow_capture:
+                raise ContractError('native_operation_precheck_anchor_required')
+            provider = validator.registry.get(selected[0].kind).provider
+            reader = native_snapshot_reader(provider)
+            if not callable(reader):
+                raise ContractError('native_operation_scope_reader_required')
+            current = await invoke(reader)
+            if current.get('requestId') != expected:
+                raise ContractError('native_operation_original_traffic_changed')
+            anchor = NativeOperationAnchor(operation['intent_id'], operation_id, expected,
+                current.get('roundId'), current.get('generation'))
+            await self._record(operation_id, native_resource_anchor=document(anchor))
+        if (anchor.intent_id, anchor.operation_id, anchor.traffic_request_id) != (
+                operation['intent_id'], operation_id, expected):
+            raise ContractError('native_operation_original_anchor_changed')
+        return anchor
+
+    async def _materialize_native_parameters(self, request, *, owner=None, action=None, receipts=()):
         materializer = getattr(getattr(self.planner, 'validator', None), 'materialize_native_parameters', None)
-        return await invoke(materializer, request) if callable(materializer) else request
+        if not callable(materializer):
+            return request
+        policy = getattr(self.planner.validator, 'targets', {}).get((request.action, request.target_id))
+        if not getattr(policy, 'server_parameter_names', ()):
+            return request
+        if owner is None or action is None:
+            raise ContractError('native_operation_dispatch_context_required')
+        anchor = await self._native_operation_anchor(request.operation_id, owner, (action,), allow_capture=False)
+        if action.cohort_from_action_id:
+            # _materialize_bound_cohort already independently verified this exact
+            # receipt and saved the operation's immutable selected native keys.
+            operation = await invoke(self.repository.operation, request.operation_id, owner)
+            materialized = operation.get('cohort_materializations', {}).get(action.action_id)
+            prior = next((r for r in receipts if r.get('action_id') == action.cohort_from_action_id), None)
+            if (not materialized or not prior or materialized.get('native_session_keys') != list(request.session_keys)
+                    or materialized.get('source_action_id') != action.cohort_from_action_id
+                    or prior['request']['action'] not in {'assign_sessions', 'reestablish_sessions'}
+                    or prior['request']['owner_id'] != request.owner_id
+                    or prior['request']['operation_id'] != request.operation_id
+                    or prior.get('state') != 'installation_confirmed'):
+                raise ContractError('native_operation_cohort_anchor_receipt_required')
+            execution = prior.get('installed', {}).get('execution', prior.get('installed', {}))
+            generation = execution.get('new_generation', execution.get('generation'))
+            if type(generation) is not int or generation < 1:
+                raise ContractError('native_operation_cohort_generation_required')
+            from dataclasses import replace
+            anchor = replace(anchor, generation=generation)
+        return await invoke(materializer, request, anchor)
 
     async def _materialize_bound_cohort(self, request, action, receipts, owner):
         """Resolve only the typed predecessor's independently read native cohort."""
@@ -468,6 +529,17 @@ class IntentService:
                 'observation_available':self.observer is not None,
                 'planner_available':self.planner is not None,
                 'identity_mode':'local-session-partition; not authentication'}
+        from .resource_enablement import resource_action_readiness
+        readiness = resource_action_readiness(getattr(self, 'resource_configuration', {}), capabilities)
+        # Public capabilities describe availability, never the private planner's
+        # exact native resource identities or budget policy identifiers.
+        value['resource_readiness'] = {'schema': readiness['schema'], 'actions': [
+            {key: row[key] for key in ('action', 'provider', 'provider_configured',
+                'native_capability_status', 'configured_authorized',
+                'execution_requirements', 'native_execution_verified')} |
+            {'authorized_target_count': len(row['authorized_targets']),
+             'budget_authorized': bool(row['budget_ids'])}
+            for row in readiness['actions']]}
         admission_capabilities = getattr(self.pre_traffic_admission, 'capabilities', None)
         if callable(admission_capabilities):
             value['device_admission'] = await invoke(admission_capabilities)
@@ -1374,8 +1446,15 @@ class IntentService:
         snapshot = context.get('snapshot')
         try:
             if context.get("candidates") is not None:
+                native_anchor = await self._native_operation_anchor(op_id, owner,
+                    tuple(a for p in context['candidates'] for a in p.actions))
+                options = dict(context['operation'].get('control_options', {}))
+                if native_anchor is not None:
+                    options['_native_operation_anchor'] = native_anchor
                 plan = await invoke(self.planner.validate_candidates, context["candidates"], intent, snapshot, membership,
-                                    control_options=context['operation'].get('control_options', {}))
+                                    control_options=options)
+            elif plan is not None:
+                await self._native_operation_anchor(op_id, owner, plan.actions)
             rebuilding = {k for a in plan.actions if a.kind == 'reestablish_sessions' for k in a.session_keys}
             changing_qos = {k for a in plan.actions if a.kind == 'update_qos' for k in a.session_keys}
             if rebuilding & changing_qos:
@@ -1548,7 +1627,7 @@ class IntentService:
                             raise ContractError('dependency_node_capacity_proof_missing')
                 request=await self._materialize_deferred_admission(request,action,receipts,owner)
                 request=await self._materialize_bound_cohort(request,action,receipts,owner)
-                request = await self._materialize_native_parameters(request)
+                request = await self._materialize_native_parameters(request, owner=owner, action=action, receipts=receipts)
                 checked = await invoke(self.registry.preflight,request)
                 await invoke(self.repository.assert_fleet_open,intent_id,op_id)
                 if not intent.is_active(self.clock()):

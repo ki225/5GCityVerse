@@ -301,6 +301,14 @@ class NativePopulationCallbacks:
     async def _round(self): return await invoke(current_reader(self.ledger))
 
     async def profile_reader(self,*,intent,lease):
+        controller=self.context.ue_controller
+        if getattr(controller.driver,'backend',None)=='free-ran-ue':
+            from backend.onprem.runtime.current_launch import current_device_launch_contract
+            return current_device_launch_contract(controller.driver)
+        return await self.replacement_profile_reader(intent=intent,lease=lease)
+
+    async def replacement_profile_reader(self,*,intent,lease):
+        """Historical launch evidence remains part of exact replacement proof."""
         body=await self._round()
         profile=await invoke(self.preparer.profile_reader,body)
         if type(profile) is not UEAdmissionLaunchProfile or not profile.device_sessions:
@@ -390,17 +398,25 @@ class NativePopulationCallbacks:
                 or value.topology_revision!=body.get('spatialDemand',{}).get('topologyRevision')
                 or value.spatial_revision!=spatial_revision(body)):
             raise ContractError('replacement_spatial_fence_changed')
-        value.validate_profile(await self.profile_reader(intent=intent,lease=lease))
+        value.validate_profile(await self.replacement_profile_reader(intent=intent,lease=lease))
         value.preview_workload(body,self.context.round_coordinator.resources)
         return value
 
     async def _reservation(self,intent,lease,delta):
         profile=await self.profile_reader(intent=intent,lease=lease)
+        with self.repository.connect() as db:
+            operation=db.execute('SELECT value FROM operations WHERE id=? AND owner=?',
+                (delta.operation_id,lease.owner_id)).fetchone()
+        if operation and json.loads(operation['value']).get('population_replacement_constraint') is not None:
+            profile=await self.replacement_profile_reader(intent=intent,lease=lease)
+        from backend.onprem.runtime.current_launch import CurrentDeviceLaunchContract
+        current_contract=type(profile) is CurrentDeviceLaunchContract
         scopes={d.network_scope for d in delta.added_devices}
         if len(scopes)!=1: raise ContractError('population_single_native_network_scope_required')
         from backend.onprem.runtime.ue import SLICES
         return PopulationReservation(delta.delta_id,delta.version,next(iter(scopes)),delta.created_at,
-            min(delta.valid_until,profile.valid_until),profile.profile_id,delta.reserved_sessions,delta.added_devices,
+            delta.valid_until if current_contract else min(delta.valid_until,profile.valid_until),
+            profile.contract_id if current_contract else profile.profile_id,delta.reserved_sessions,delta.added_devices,
             tuple((name,sum(d.access_slice==name for d in delta.added_devices)) for name in SLICES))
 
     async def _active(self):
@@ -1082,7 +1098,9 @@ def build_native_population_coordinator(context,config,service):
     if not policy['enabled']: return None
     preparer=getattr(service,'pre_traffic_admission',None)
     if (preparer is None or service.admission_coordinator is None
-            or not all(callable(getattr(preparer,k,None)) for k in ('profile_reader','classification_reader'))
+            or not callable(getattr(preparer,'classification_reader',None))
+            or (not callable(getattr(preparer,'profile_reader',None))
+                and getattr(getattr(context.ue_controller,'driver',None),'backend',None)!='free-ran-ue')
             or not hasattr(preparer.planner,'validator')
             or not callable(getattr(getattr(service.observer,'session_binding_reader',None),'current_bindings',None))):
         raise ContractError('population_native_capacity_policy_ports_not_configured')
@@ -1101,6 +1119,7 @@ def build_native_population_coordinator(context,config,service):
         adapter.commissioning=callbacks.commissioning=commission
     adapter.verify_parent_population_installation=callbacks.verify_parent_population_installation
     adapter.replacement_reader=callbacks.replacement_reader
+    adapter.replacement_profile_reader=callbacks.replacement_profile_reader
     adapter.prepare_drain=callbacks.prepare_drain
     adapter.finalize_member_departure=callbacks.finalize_member_departure
     adapter.before_population_publication=callbacks.before_population_publication

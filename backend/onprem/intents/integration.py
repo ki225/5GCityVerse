@@ -931,4 +931,5 @@ def configured_intent_service(context):
     empty_reader=getattr(service.population_coordinator,'current_empty_proof',None)
     if callable(empty_reader):
         observer.empty_population_reader=empty_reader
+    service.resource_configuration = config
     return service

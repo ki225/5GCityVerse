@@ -96,7 +96,17 @@ class ResourceActuator:
         if self.provider is None:
             return (Capability(self.action, "not_configured", "Native provider is not configured"),)
         try:
-            values = tuple(c for c in self.provider.capabilities() if c.action == self.action)
+            snapshot = tuple(self.provider.capabilities())
+        except Exception:
+            snapshot = None
+        return self._capabilities_from_snapshot(snapshot)
+
+    def _capabilities_from_snapshot(self, snapshot):
+        """Project a single provider read; unavailable proof stays fail closed."""
+        try:
+            if snapshot is None:
+                raise ActuationBlocked('Native capability snapshot unavailable')
+            values = tuple(c for c in snapshot if c.action == self.action)
             return values or (Capability(self.action, "not_configured", "No commissioned capability"),)
         except Exception:
             return (Capability(self.action, "not_configured", "Native capability proof is unavailable"),)
@@ -246,7 +256,22 @@ class ActuatorRegistry:
         return self._adapters[value]
 
     def capabilities(self):
-        return tuple(c for adapter in self._adapters.values() for c in adapter.capabilities())
+        # Request-local only. Several actions share one native provider; repeat
+        # reads would rescan the same nodes/Pods and could mix observation times.
+        # No snapshot survives this call or enters a command's fresh preflight.
+        snapshots, result = {}, []
+        for adapter in self._adapters.values():
+            if type(adapter) is not ResourceActuator or adapter.provider is None:
+                result.extend(adapter.capabilities())
+                continue
+            key = id(adapter.provider)
+            if key not in snapshots:
+                try:
+                    snapshots[key] = tuple(adapter.provider.capabilities())
+                except Exception:
+                    snapshots[key] = None
+            result.extend(adapter._capabilities_from_snapshot(snapshots[key]))
+        return tuple(result)
 
     def preflight(self, request):
         return self.get(request.action).preflight(request)

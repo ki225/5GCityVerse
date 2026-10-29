@@ -1,6 +1,5 @@
 """Intent HTTP boundary using the existing on-prem JSON error conventions."""
 import json
-import secrets
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from backend.onprem.api.http import json_error, request_session_id
@@ -77,16 +76,6 @@ class IntentController:
             return str(principal.identity)
         return request_session_id(request)
 
-    def authorize_write(self, request):
-        # Session headers partition records; they do not grant native mutation authority.
-        expected = getattr(self.context,'intent_write_token',None)
-        if not expected:
-            return json_error(503,'INTENT_WRITE_NOT_CONFIGURED','Configure intent write authority before submitting operations')
-        supplied = request.headers.get('authorization','')
-        if not secrets.compare_digest(supplied,'Bearer '+expected):
-            return json_error(403,'INTENT_WRITE_FORBIDDEN','Intent write capability is required')
-        return None
-
     async def body(self, request):
         content = bytearray()
         async for chunk in request.stream():
@@ -99,10 +88,6 @@ class IntentController:
         return value
 
     async def dispatch(self, request, action):
-        if request.url.path != '/api/capabilities':
-            denied = self.authorize_write(request)
-            if denied:
-                return denied
         try:
             result = await action()
             return JSONResponse(result,headers={'Cache-Control':'no-store'})
@@ -114,9 +99,6 @@ class IntentController:
             return json_error(400,'INVALID_INTENT_REQUEST','Invalid intent contract, revision, pagination, or JSON')
 
     async def create(self, request):
-        denied = self.authorize_write(request)
-        if denied:
-            return denied
         async def action():
             return await self.service.submit(await self.body(request),self.owner(request),request.headers.get('idempotency-key',''))
         result = await self.dispatch(request,action)
@@ -150,9 +132,6 @@ class IntentController:
         return await self.dispatch(request,action)
 
     async def population(self, request):
-        denied=self.authorize_write(request)
-        if denied:
-            return denied
         change=getattr(self.service,'change_population',None)
         if not callable(change):
             return json_error(503,'INTENT_POPULATION_NOT_CONFIGURED','Native population changes are not configured')
@@ -171,9 +150,6 @@ class IntentController:
         return response
 
     async def update(self, request):
-        denied = self.authorize_write(request)
-        if denied:
-            return denied
         async def action():
             expected = request.headers.get('if-match','').strip('"')
             if not expected.isdigit() or int(expected)<1:
@@ -205,9 +181,6 @@ class IntentController:
         return await self._operation(request,release=True)
 
     async def _operation(self, request, *, release=False):
-        denied = self.authorize_write(request)
-        if denied:
-            return denied
         async def action():
             raw = await request.body()
             options = None
@@ -251,7 +224,10 @@ class IntentController:
     async def capabilities(self, request):
         async def action():
             value = await self.service.capabilities()
-            value['write_configured']=bool(getattr(self.context,'intent_write_token',None))
+            # City requests use the session owner partition. Native permission
+            # remains with server policy/actuator guards, never an HTTP token.
+            value['write_configured']=callable(getattr(self.service,'submit',None))
+            value['write_token_required']=False
             value.setdefault('population',dict(fleet_join=False,fleet_leave=False,configured=False,
                 reason='native_v2_population_not_commissioned'))
             return value

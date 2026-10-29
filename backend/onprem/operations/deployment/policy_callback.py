@@ -28,7 +28,7 @@ def objects(pcf_ip, namespace="free5gc-onprem", node="cv5g-cp", resource_base=No
                 **({"spec": spec} if spec is not None else {}), **extra}
     source = Path(__file__).resolve().parents[4] / "backend/onprem/storage/callbacks.py"
     cm = resource("ConfigMap", "cityverse-af-callback-source", data={
-        "onprem__policy__policy_callback.py": source.read_text(encoding="utf-8"),
+        "onprem__storage__callbacks.py": source.read_text(encoding="utf-8"),
         "onprem__api__policy_callback_asgi.py": (source.parents[1] / "api/policy_callback_asgi.py").read_text(encoding="utf-8")})
     source_checksum = hashlib.sha256(json.dumps(cm["data"], sort_keys=True).encode()).hexdigest()
     if recovery_fence:
@@ -70,7 +70,7 @@ def objects(pcf_ip, namespace="free5gc-onprem", node="cv5g-cp", resource_base=No
             "annotations": {"checksum/callback-source": source_checksum}}, "spec": {
             "automountServiceAccountToken": False, "nodeSelector": {"kubernetes.io/hostname": node},
             "containers": [container], "volumes": [{"name": "source", "configMap": {"name": cm["metadata"]["name"], "items": [
-                {"key": "onprem__policy__policy_callback.py", "path": "onprem/policy/policy_callback.py"},
+                {"key": "onprem__storage__callbacks.py", "path": "onprem/storage/callbacks.py"},
                 {"key": "onprem__api__policy_callback_asgi.py", "path": "onprem/api/policy_callback_asgi.py"}]}},
             {"name": "state", "persistentVolumeClaim": {"claimName": "cityverse-af-callback"}}]}}})
     svc = resource("Service", "cityverse-af-callback", {"type": "ClusterIP", "selector": labels,

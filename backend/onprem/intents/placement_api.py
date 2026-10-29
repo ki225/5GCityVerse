@@ -18,10 +18,6 @@ class PlacementController(IntentController):
         return getattr(self.context, 'placement_service', None)
 
     async def dispatch_placement(self, request, action, *, public=False, status=200):
-        if not public:
-            denied = self.authorize_write(request)
-            if denied is not None:
-                return denied
         if self.service is None:
             return json_error(503, 'PLACEMENT_NOT_CONFIGURED', 'Placement service is not configured')
         try:

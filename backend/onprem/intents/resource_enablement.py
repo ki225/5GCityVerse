@@ -30,7 +30,7 @@ ACTION_PROVIDERS = {
 }
 FRAGMENT_KEYS = frozenset({'providers', 'placement', 'placement_topology',
     'qos_telemetry_targets', 'nf_telemetry_targets', 'native_nf_load',
-    'native_nf_services', 'service_route_observation'})
+    'native_nf_services', 'service_route_observation', 'path_capacity_publication'})
 CALIBRATED_ACTIONS = frozenset({'resize_nf', 'add_upf', 'place_nf'})
 
 
@@ -52,6 +52,8 @@ def compile_resource_configuration(base, manifest, inventory, fragment=None):
     _require(inventory.get('schema') == 'cityverse.resource-inventory/v1', 'invalid_resource_inventory')
     fragment = fragment or {}
     _require(not set(fragment) - FRAGMENT_KEYS, 'unsupported_provider_fragment_field')
+    if 'path_capacity_publication' in fragment:
+        _require(type(fragment['path_capacity_publication']) is bool, 'path_capacity_publication_requires_boolean')
     config = deepcopy(base)
     for key, value in fragment.items():
         if isinstance(value, dict):

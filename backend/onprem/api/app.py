@@ -38,8 +38,6 @@ def create_app(*, settings=None, context=None):
     if not hasattr(context, 'intent_service'):
         from backend.onprem.intents.integration import configured_intent_service
         context.intent_service = configured_intent_service(context)
-    if not hasattr(context, 'intent_write_token'):
-        context.intent_write_token = os.environ.get('CITYVERSE_INTENT_WRITE_TOKEN')
     intents = IntentController(context)
     from backend.onprem.intents.placement_api import PlacementController
     if not hasattr(context, 'placement_service'):

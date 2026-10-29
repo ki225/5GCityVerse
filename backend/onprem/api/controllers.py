@@ -89,9 +89,6 @@ class ScenarioController:
                 from backend.onprem.intents.api import IntentController
                 from backend.onprem.scenarios.intent_bridge import CityIntentBridge
                 authority = IntentController(self.context)
-                denied = authority.authorize_write(request)
-                if denied:
-                    return denied
                 result = await CityIntentBridge(self.context,self.service).submit(payload,
                     authority.owner(request),request.headers.get('idempotency-key',''))
             else:

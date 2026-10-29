@@ -53,15 +53,27 @@ class ReservedServiceCatalog:
             # A physical-device count cannot classify two applications by SUPI.
             # These records came from the pinned server launch profile, not body.
             devices={d.supi:d for d in reservation.devices}
+            owners={}
+            if reservation.launch_profile_id.startswith('current-free-ran-'):
+                from backend.onprem.scenarios.contracts import bind_scenarios
+                owners={r['supi']:r for r in bind_scenarios(body,
+                    [{'supi':r.supi,'slice':r.slice} for r in reservation.allocation])}
             result={}
             for reserved in reservation.allocation:
                 specs=[s for s in devices[reserved.supi].sessions if s.session_id==reserved.session_id]
                 if len(specs)!=1:
                     raise PlanningError('needs_definition:reserved_logical_session_classification_missing')
                 spec=specs[0]
+                profile_id=configured_session_profile(spec)
+                if owners:
+                    owner=owners[reserved.supi]
+                    configured=self.scenarios.get(owner['scenario'])
+                    if not isinstance(configured,dict) or not configured.get('configuration_id'):
+                        raise PlanningError('needs_definition:future_launch_classification_missing')
+                    profile_id=configured_profile(owner['scenario'],spec.service_type,reserved.slice)
                 token=AdmissionIdentity(reservation.network_scope,reserved.supi,reserved.pdu_session_id,reserved.nonce).token
                 result[token]={'service_type':spec.service_type,'region':spec.region,
-                    'service_profile_id':configured_session_profile(spec),
+                    'service_profile_id':profile_id,
                     'application_ids':list(spec.applications),
                     'configuration_id':'device-profile:'+reservation.launch_profile_id+':'+reservation.version,
                     'source':'configured-city-launch-classification/v1'}
@@ -160,7 +172,7 @@ def requested_session_workload(body,reservation,compiler):
             raise PlanningError('needs_definition:reserved_session_slice_not_commissioned')
         rows.append({'identity':AdmissionIdentity(reservation.network_scope,reserved.supi,
                      reserved.pdu_session_id,reserved.nonce).token,'slice':slices[0],
-                     'service_type':spec.service_type,'region':spec.region,'ue_id':reserved.supi})
+                      'service_type':spec.service_type,'region':spec.region,'ue_id':reserved.supi})
     try:
         metadata=compiler.compile(rows,traffic_mode=body.get('trafficMode','functional'),
                                   service_requirements=body.get('serviceRequirements'))
@@ -349,12 +361,16 @@ class PreTrafficAdmissionPreparer:
         from backend.onprem.scenarios.contracts import slice_counts,validate_scenario_request
         if intent.definition_issues(self.planner.validator.authority):
             raise PlanningError('needs_definition:pretraffic_policy_authority')
-        if self.profile_reader is None:
-            raise PlanningError('needs_measurement:commissioned_ue_launch_profile_missing')
         valid=validate_scenario_request(body,allow_none=True)
-        profile=await invoke(self.profile_reader,valid)
-        if type(profile) is not UEAdmissionLaunchProfile:
-            raise PlanningError('needs_measurement:commissioned_ue_launch_profile_missing')
+        launch_args={}
+        if getattr(getattr(self.controller,'driver',None),'backend',None)=='free-ran-ue':
+            from backend.onprem.runtime.current_launch import current_device_launch_contract
+            launch_args['launch_contract']=current_device_launch_contract(self.controller.driver)
+        else:
+            profile=await invoke(self.profile_reader,valid) if self.profile_reader else None
+            if type(profile) is not UEAdmissionLaunchProfile:
+                raise PlanningError('needs_measurement:commissioned_ue_launch_profile_missing')
+            launch_args['profile']=profile
         bridge=getattr(self.planner,'bootstrap',None)
         if bridge:
             bridge.check_configured()
@@ -362,7 +378,7 @@ class PreTrafficAdmissionPreparer:
             reservation=bridge.resume_held(operation_id,owner,valid) if bridge else None
             if reservation is None:
                 reservation=await self.controller.reserve(slice_counts(valid),owner_id=owner,operation_id=operation_id,
-                    request_id=valid['requestId'],network_scope=self.network_scope,valid_until=intent.valid_until,profile=profile)
+                    request_id=valid['requestId'],network_scope=self.network_scope,valid_until=intent.valid_until,**launch_args)
         except Exception:
             if bridge and bridge.current(operation_id,owner):
                 from .pretraffic_infrastructure import BootstrapPreparationRecovery
