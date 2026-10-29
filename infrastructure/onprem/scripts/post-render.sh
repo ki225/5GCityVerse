@@ -10,4 +10,4 @@ trap cleanup EXIT
 cat > "$stage/resources.yaml"
 cp "$chart_root/patches/"*.yaml "$stage/"
 printf '\nnamespace: %s\n' "$namespace" >> "$stage/kustomization.yaml"
-kubectl kustomize "$stage"
+kubectl kustomize "$stage" | python3 "$chart_root/scripts/normalize-node-selectors.py"

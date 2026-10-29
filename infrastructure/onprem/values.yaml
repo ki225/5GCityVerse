@@ -39,7 +39,8 @@ free5gc:
       nodeSelector:
         cityverse.io/site: distributed
       image:
-        tag: v4.2.2@sha256:8fc343349f7b0d55a257ecae328bff4e2d4b6800004ed932c128b2699a3860e7
+        name: docker.io/cityverse/amf
+        tag: 02675d94-cas-34ccdeeb@sha256:ece65f6aaf62851ae1ab0ba860b34565994c0f4f6a9a057d4eb9506eeb329cf3
       resources:
         requests:
           cpu: 150m
@@ -512,7 +513,45 @@ images:
   gnb: docker.io/cityverse/free-ran-ue@sha256:be15100a4ce6fa74161ee982657d3f61ff4438b11378160992a7b09a32682228
   curl: curlimages/curl:8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
   probe: busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
-  traffic: networkstatic/iperf3@sha256:c1e4a239a83d1d60975bce1c9b7661af5517e362bf335f66a2c5b6adaeb4f19f
+  traffic: docker.io/cityverse/traffic-manager@sha256:2693813f2fcaa58e7de21f05d0871b7cbcb1575aecb447bd2a2db7159ca2490c
+  upfEvidence: python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e
+  ranEvidence: python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e
+# Backend deployment bootstrap creates these external source/credential objects.
+# Helm contains references and configuration only, never Python API source or tokens.
+nativeRuntime:
+  enabled: true
+  networkScope: cityverse-onprem
+  trafficManager:
+    existingTokenSecret: cityverse-traffic-manager
+  ranEvidence:
+    existingSourceConfigMap: cityverse-ran-evidence-source
+    sourceRevision: ''
+    resources:
+      requests: {cpu: 10m, memory: 24Mi}
+      limits: {cpu: 100m, memory: 64Mi}
+  smf:
+    existingTokenSecret: smf-qer-actuator-token
+    inventoryTokenSecret: cityverse-smf-inventory
+    stateHostPath: /var/lib/cityverse/smf-intent-state
+    dynamicUpfTemplates: {}
+    extraUpfOrigins: {}
+  upfEvidence:
+    existingSourceConfigMap: cityverse-upf-collector-source
+    sourceRevision: ''
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+# Optional static retained storage; nodeName must be explicitly supplied by the operator.
+# This reuses the existing MongoDB directory without moving or initializing its files.
+localStorage:
+  mongodb:
+    enabled: false
+    name: cityverse-mongodb
+    nodeName: ''
+    path: /var/lib/cityverse-mongodb
+    size: 10Gi
+    storageClass: cityverse-local
+    createStorageClass: false
 traffic:
   enabled: true
   resources:

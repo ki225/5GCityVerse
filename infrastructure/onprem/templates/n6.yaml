@@ -28,7 +28,21 @@ spec:
         {{- if $.Values.traffic.enabled }}
         - name: traffic
           image: {{ $.Values.images.traffic }}
+          {{- if $.Values.nativeRuntime.enabled }}
+          command: [/usr/local/bin/cityverse-traffic-manager]
+          env:
+            - name: CITYVERSE_TRAFFIC_MANAGER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "nativeRuntime.trafficManager.existingTokenSecret is required" $.Values.nativeRuntime.trafficManager.existingTokenSecret }}
+                  key: token
+            - {name: POD_UID, valueFrom: {fieldRef: {fieldPath: metadata.uid}}}
+            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+            - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
+          ports: [{name: traffic-control, containerPort: 9084, protocol: TCP}]
+          {{- else }}
           command: [bash, -c, "trap 'exit 0' TERM INT; while :; do sleep 1 & wait $!; done"]
+          {{- end }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 1337
@@ -36,7 +50,11 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
           resources: {{ $.Values.traffic.resources | toYaml | nindent 12 }}
+          {{- if $.Values.nativeRuntime.enabled }}
+          readinessProbe: {httpGet: {path: /healthz, port: 9084}, periodSeconds: 5, timeoutSeconds: 2}
+          {{- else }}
           readinessProbe: {exec: {command: [iperf3, --version]}, periodSeconds: 10}
+          {{- end }}
           volumeMounts: [{name: traffic-tmp, mountPath: /tmp}]
       volumes: [{name: traffic-tmp, emptyDir: {sizeLimit: 64Mi}}]
         {{- end }}

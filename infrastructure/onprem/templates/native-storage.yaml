@@ -1,0 +1,34 @@
+{{- if .Values.localStorage.mongodb.enabled }}
+{{- $storage := .Values.localStorage.mongodb -}}
+{{- if $storage.createStorageClass }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $storage.storageClass }}
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ $storage.name }}
+  annotations: {helm.sh/resource-policy: keep}
+  labels: {app.kubernetes.io/part-of: cityverse}
+spec:
+  capacity: {storage: {{ $storage.size }}}
+  volumeMode: Filesystem
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ $storage.storageClass }}
+  local:
+    path: {{ required "localStorage.mongodb.path is required" $storage.path | quote }}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [{{ required "localStorage.mongodb.nodeName is required when enabled" $storage.nodeName | quote }}]
+{{- end }}

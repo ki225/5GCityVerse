@@ -41,6 +41,9 @@ spec:
         cityverse.io/site: {{ $slice.site }}
       annotations:
         checksum/config: {{ dict "uePool" $slice.uePool "n3Subnet" $slice.n3Subnet "n4Address" $slice.n4Address "n6Subnet" $slice.n6Subnet | toJson | sha256sum }}
+        {{- if $.Values.nativeRuntime.enabled }}
+        checksum/native-collector: {{ $.Values.nativeRuntime.upfEvidence | toJson | sha256sum }}
+        {{- end }}
         k8s.v1.cni.cncf.io/networks: {{ list (dict "name" (printf "n3-%s" $name) "interface" "n3" "ips" (list (printf "%s.10/24" $slice.n3Subnet))) (dict "name" "n4" "interface" "n4" "ips" (list (printf "%s/24" $slice.n4Address))) (dict "name" (printf "n6-%s" $name) "interface" "n6" "ips" (list (printf "%s.10/24" $slice.n6Subnet))) | toJson | quote }}
     spec:
       automountServiceAccountToken: false
@@ -68,7 +71,42 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - {name: config, mountPath: /etc/cityverse, readOnly: true}
+        {{- if $.Values.nativeRuntime.enabled }}
+        - name: upf-evidence
+          image: {{ $.Values.images.upfEvidence }}
+          workingDir: /opt/cityverse
+          command: [python, -m, backend.onprem.integrations.upf]
+          args: [--upf, upf-{{ $name }}, --commissioned-upf, upf-{{ $name }}, --interface, upfgtp, --host, "$(POD_IP)", --port, "9081", --loopback-listener, --policy-evidence]
+          env:
+            - {name: POD_IP, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
+            - {name: POD_UID, valueFrom: {fieldRef: {fieldPath: metadata.uid}}}
+            - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+          ports: [{name: upf-evidence, containerPort: 9081, protocol: TCP}]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL], add: [NET_ADMIN]}
+          resources: {{ $.Values.nativeRuntime.upfEvidence.resources | toYaml | nindent 12 }}
+          readinessProbe: {tcpSocket: {port: 9081}, periodSeconds: 5, timeoutSeconds: 1}
+          volumeMounts: [{name: native-collector-source, mountPath: /opt/cityverse/backend, readOnly: true}]
+        {{- end }}
       volumes:
         - name: config
           configMap: {name: upf-{{ $name }}-config}
+        {{- if $.Values.nativeRuntime.enabled }}
+        - name: native-collector-source
+          configMap:
+            name: {{ required "nativeRuntime.upfEvidence.existingSourceConfigMap is required" $.Values.nativeRuntime.upfEvidence.existingSourceConfigMap }}
+            items: [{key: onprem__integrations__upf.py, path: onprem/integrations/upf.py}]
+        {{- end }}
+{{- if $.Values.nativeRuntime.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: upf-{{ $name }}-evidence, namespace: {{ $.Release.Namespace }}}
+spec:
+  selector: {{ $labels | toYaml | nindent 4 }}
+  ports: [{name: upf-evidence, port: 9081, targetPort: 9081, protocol: TCP}]
+{{- end }}
 {{- end }}

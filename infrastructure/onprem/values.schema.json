@@ -1,59 +1,353 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["free5gc", "city", "networks", "images"],
+  "required": [
+    "free5gc",
+    "city",
+    "networks",
+    "images"
+  ],
   "properties": {
     "city": {
       "type": "object",
-      "required": ["sites", "placement", "gnbs", "slices", "core"],
+      "required": [
+        "sites",
+        "placement",
+        "gnbs",
+        "slices",
+        "core"
+      ],
       "properties": {
         "transportDelay": {
           "type": "object",
-          "required": ["enabled", "fibreUsPerKm", "routeStretch", "processingUs"],
+          "required": [
+            "enabled",
+            "fibreUsPerKm",
+            "routeStretch",
+            "processingUs"
+          ],
           "properties": {
-            "enabled": {"type": "boolean"},
-            "fibreUsPerKm": {"type": "number", "minimum": 0, "maximum": 10},
-            "routeStretch": {"type": "number", "minimum": 1, "maximum": 3},
+            "enabled": {
+              "type": "boolean"
+            },
+            "fibreUsPerKm": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "routeStretch": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 3
+            },
             "processingUs": {
-              "type": "object", "required": ["edge", "distributed", "central"],
+              "type": "object",
+              "required": [
+                "edge",
+                "distributed",
+                "central"
+              ],
               "additionalProperties": false,
               "properties": {
-                "edge": {"type": "integer", "minimum": 0, "maximum": 50000},
-                "distributed": {"type": "integer", "minimum": 0, "maximum": 50000},
-                "central": {"type": "integer", "minimum": 0, "maximum": 50000}
+                "edge": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50000
+                },
+                "distributed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50000
+                },
+                "central": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50000
+                }
               }
             }
           }
         },
         "placement": {
           "type": "object",
-          "required": ["mode"],
-          "properties": {"mode": {"enum": ["physical", "colocated"]}}
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "physical",
+                "colocated"
+              ]
+            }
+          }
         },
         "gnbs": {
-          "type": "array", "minItems": 7, "maxItems": 7,
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
           "items": {
             "type": "object",
-            "required": ["id", "workload", "slice", "networkIndex", "n3Host", "position"],
+            "required": [
+              "id",
+              "workload",
+              "slice",
+              "networkIndex",
+              "n3Host",
+              "position"
+            ],
             "properties": {
-              "id": {"type": "string", "pattern": "^gnb-0-[0-6]$"},
-              "workload": {"type": "string", "pattern": "^gnb-[a-z0-9-]+$"},
-              "slice": {"enum": ["embb", "urllc", "mmtc", "v2x"]},
-              "networkIndex": {"type": "integer", "minimum": 1, "maximum": 200},
-              "n3Host": {"type": "integer", "minimum": 31, "maximum": 230},
-              "position": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number", "minimum": 0, "maximum": 24}},
-              "replicas": {"const": 1}
+              "id": {
+                "type": "string",
+                "pattern": "^gnb-0-[0-6]$"
+              },
+              "workload": {
+                "type": "string",
+                "pattern": "^gnb-[a-z0-9-]+$"
+              },
+              "slice": {
+                "enum": [
+                  "embb",
+                  "urllc",
+                  "mmtc",
+                  "v2x"
+                ]
+              },
+              "networkIndex": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200
+              },
+              "n3Host": {
+                "type": "integer",
+                "minimum": 31,
+                "maximum": 230
+              },
+              "position": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 24
+                }
+              },
+              "replicas": {
+                "const": 1
+              }
             }
           }
         },
         "slices": {
           "type": "object",
-          "required": ["embb", "urllc", "mmtc", "v2x"],
-          "minProperties": 4, "maxProperties": 4,
+          "required": [
+            "embb",
+            "urllc",
+            "mmtc",
+            "v2x"
+          ],
+          "minProperties": 4,
+          "maxProperties": 4,
           "additionalProperties": {
             "type": "object",
-            "required": ["site", "sst", "sd", "uePool", "n3Subnet", "n4Address", "n6Subnet", "resources"],
-            "properties": {"sd": {"type": "string", "pattern": "^[0-9a-f]{6}$"}, "replicas": {"const": 1}}
+            "required": [
+              "site",
+              "sst",
+              "sd",
+              "uePool",
+              "n3Subnet",
+              "n4Address",
+              "n6Subnet",
+              "resources"
+            ],
+            "properties": {
+              "sd": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{6}$"
+              },
+              "replicas": {
+                "const": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "nativeRuntime": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "networkScope",
+        "smf",
+        "upfEvidence",
+        "trafficManager",
+        "ranEvidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "networkScope": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9.-]*$",
+          "maxLength": 253
+        },
+        "smf": {
+          "type": "object",
+          "required": [
+            "existingTokenSecret",
+            "inventoryTokenSecret",
+            "stateHostPath",
+            "dynamicUpfTemplates",
+            "extraUpfOrigins"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "existingTokenSecret": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]*$",
+              "maxLength": 253
+            },
+            "inventoryTokenSecret": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]*$",
+              "maxLength": 253
+            },
+            "stateHostPath": {
+              "type": "string",
+              "pattern": "^/var/lib/[a-zA-Z0-9/_-]+$"
+            },
+            "dynamicUpfTemplates": {
+              "type": "object"
+            },
+            "extraUpfOrigins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^https?://[^/]+(:[0-9]+)?$"
+              }
+            }
+          }
+        },
+        "upfEvidence": {
+          "type": "object",
+          "required": [
+            "existingSourceConfigMap",
+            "sourceRevision",
+            "resources"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "existingSourceConfigMap": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]*$",
+              "maxLength": 253
+            },
+            "sourceRevision": {
+              "type": "string",
+              "pattern": "^([a-f0-9]{64})?$"
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        },
+        "trafficManager": {
+          "type": "object",
+          "required": [
+            "existingTokenSecret"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "existingTokenSecret": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]*$",
+              "maxLength": 253
+            }
+          }
+        },
+        "ranEvidence": {
+          "type": "object",
+          "required": [
+            "existingSourceConfigMap",
+            "sourceRevision",
+            "resources"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "existingSourceConfigMap": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]*$",
+              "maxLength": 253
+            },
+            "sourceRevision": {
+              "type": "string",
+              "pattern": "^([a-f0-9]{64})?$"
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "localStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mongodb"
+      ],
+      "properties": {
+        "mongodb": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "name",
+            "nodeName",
+            "path",
+            "size",
+            "storageClass",
+            "createStorageClass"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]*$",
+              "maxLength": 253
+            },
+            "nodeName": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^/var/lib/[a-zA-Z0-9/_-]+$"
+            },
+            "size": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*Gi$"
+            },
+            "storageClass": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]*$",
+              "maxLength": 253
+            },
+            "createStorageClass": {
+              "type": "boolean"
+            }
           }
         }
       }

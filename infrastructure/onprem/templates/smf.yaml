@@ -2,6 +2,14 @@
 {{- range $name, $slice := .Values.city.slices -}}
 {{- $_ := set $topology $name (dict "sst" $slice.sst "sd" $slice.sd "uePool" $slice.uePool "n3Subnet" $slice.n3Subnet "n4Address" $slice.n4Address) -}}
 {{- end -}}
+{{- $native := .Values.nativeRuntime -}}
+{{- $origins := dict -}}
+{{- if $native.enabled -}}
+{{- range $name, $slice := .Values.city.slices -}}
+{{- $_ := set $origins $slice.n4Address (printf "http://upf-%s-evidence.%s.svc.cluster.local:9081" $name $.Release.Namespace) -}}
+{{- end -}}
+{{- $origins = mergeOverwrite $origins (deepCopy $native.smf.extraUpfOrigins) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -73,6 +81,9 @@ spec:
       labels: {app.kubernetes.io/name: smf, cityverse.io/runtime: kubeadm, cityverse.io/role: core, cityverse.io/site: {{ .Values.city.core.smf.site }}}
       annotations:
         checksum/config: {{ $topology | toJson | sha256sum }}
+        {{- if $native.enabled }}
+        checksum/native-config: {{ $native.smf | toJson | sha256sum }}
+        {{- end }}
         k8s.v1.cni.cncf.io/networks: '[{"name":"n4","interface":"n4","ips":["172.22.4.10/24"]}]'
     spec:
       automountServiceAccountToken: false
@@ -81,12 +92,45 @@ spec:
         - name: smf
           image: {{ .Values.images.smf }}
           command: [/free5gc/smf, -c, /etc/cityverse/smfcfg.yaml, -u, /etc/cityverse/uerouting.yaml]
-          env: [{name: SMF_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000005"}]
+          env:
+            - {name: SMF_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000005"}
+            {{- if $native.enabled }}
+            - {name: SMF_SESSION_QER_NETWORK_SCOPE, value: {{ $native.networkScope | quote }}}
+            - {name: SMF_SESSION_QER_STATE_DIR, value: /var/lib/cityverse/smf-intent-state}
+            - {name: SMF_QER_ACTUATOR_TOKEN_FILE, value: /var/run/secrets/5gcityverse/qer-actuator/token}
+            - {name: SMF_QER_ACTUATOR_SUPI_ONLY, value: "true"}
+            - name: CITYVERSE_SMF_INVENTORY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "nativeRuntime.smf.inventoryTokenSecret is required" $native.smf.inventoryTokenSecret }}
+                  key: token
+            - name: SMF_SESSION_QER_UPF_ORIGINS
+              value: {{ $origins | toJson | quote }}
+            - name: SMF_DYNAMIC_UPF_TEMPLATES
+              value: {{ $native.smf.dynamicUpfTemplates | toJson | quote }}
+            {{- end }}
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {{ .Values.city.core.smf.resources | toYaml | nindent 12 }}
           readinessProbe: {tcpSocket: {port: 8000}, periodSeconds: 5}
-          volumeMounts: [{name: config, mountPath: /etc/cityverse, readOnly: true}]
-      volumes: [{name: config, configMap: {name: smf-config}}]
+          volumeMounts:
+            - {name: config, mountPath: /etc/cityverse, readOnly: true}
+            {{- if $native.enabled }}
+            - {name: native-session-intent-state, mountPath: /var/lib/cityverse/smf-intent-state}
+            - {name: qer-actuator-token, mountPath: /var/run/secrets/5gcityverse/qer-actuator, readOnly: true}
+            {{- end }}
+      volumes:
+        - {name: config, configMap: {name: smf-config}}
+        {{- if $native.enabled }}
+        - name: native-session-intent-state
+          hostPath:
+            path: {{ required "nativeRuntime.smf.stateHostPath is required" $native.smf.stateHostPath | quote }}
+            type: Directory
+        - name: qer-actuator-token
+          secret:
+            secretName: {{ required "nativeRuntime.smf.existingTokenSecret is required" $native.smf.existingTokenSecret }}
+            defaultMode: 0444
+            items: [{key: token, path: token}]
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

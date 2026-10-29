@@ -1,0 +1,54 @@
+# Default Ubuntu single-node overlay. render.sh resolves the local hostname without querying Kubernetes.
+city:
+  placement:
+    mode: colocated
+    nodeSelector:
+      kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+free5gc:
+  mongodb:
+    nodeSelector:
+      cityverse.io/site: null
+      kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+  free5gc-amf:
+    amf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+  free5gc-ausf:
+    ausf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+  free5gc-nrf:
+    nrf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+  free5gc-pcf:
+    pcf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+  free5gc-udm:
+    udm:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+  free5gc-udr:
+    udr:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+  free5gc-webui:
+    webui:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: CITYVERSE_LOCAL_HOSTNAME
+
+
+# Helm owns only the PV definition; the retained host database directory is reused.
+localStorage:
+  mongodb:
+    enabled: true
+    nodeName: CITYVERSE_LOCAL_HOSTNAME
+    createStorageClass: false

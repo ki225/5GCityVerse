@@ -35,6 +35,9 @@ spec:
         cityverse.io/map-object: {{ $gnb.id }}
         cityverse.io/position-km: {{ $gnb.position | toJson | quote }}
         checksum/config: {{ include "cityverse.gnbConfig" (list $ $gnb) | sha256sum }}
+        {{- if $.Values.nativeRuntime.enabled }}
+        checksum/ran-evidence: {{ $.Values.nativeRuntime.ranEvidence | toJson | sha256sum }}
+        {{- end }}
         k8s.v1.cni.cncf.io/networks: {{ list (dict "name" "n2" "interface" "n2" "ips" (list (printf "172.22.2.%d/24" (add 30 $gnb.networkIndex)))) (dict "name" (printf "n3-%s" $gnb.slice) "interface" "n3" "ips" (list (printf "%s.%d/24" $slice.n3Subnet (int $gnb.n3Host)))) | toJson | quote }}
     spec:
       automountServiceAccountToken: false
@@ -60,9 +63,18 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - {name: config, mountPath: /etc/cityverse, readOnly: true}
+        {{- if $.Values.nativeRuntime.enabled }}
+        - {{ include "cityverse.ranEvidenceContainer" (list $ "gnb") | nindent 10 | trim }}
+        {{- end }}
       volumes:
         - name: config
           configMap: {name: {{ $gnb.workload }}-config}
+        {{- if $.Values.nativeRuntime.enabled }}
+        - name: ran-evidence-source
+          configMap:
+            name: {{ required "nativeRuntime.ranEvidence.existingSourceConfigMap is required" $.Values.nativeRuntime.ranEvidence.existingSourceConfigMap }}
+            items: [{key: onprem__api__evidence_endpoint.py, path: onprem/api/evidence_endpoint.py}]
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

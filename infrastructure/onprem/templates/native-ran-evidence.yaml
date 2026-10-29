@@ -1,0 +1,14 @@
+{{- if .Values.nativeRuntime.enabled }}
+{{/* The locked upstream AMF chart has no sidecar/extra-volume extension.
+     The existing post-renderer merges this configuration into its Deployment. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cityverse-ran-evidence-config
+  namespace: {{ .Release.Namespace }}
+data:
+  schema: cityverse.ran-evidence-config/v1
+  amf-container.json: {{ include "cityverse.ranEvidenceContainer" (list . "amf") | fromYaml | toJson | quote }}
+  source-volume.json: {{ dict "name" "ran-evidence-source" "configMap" (dict "name" (required "nativeRuntime.ranEvidence.existingSourceConfigMap is required" .Values.nativeRuntime.ranEvidence.existingSourceConfigMap) "items" (list (dict "key" "onprem__api__evidence_endpoint.py" "path" "onprem/api/evidence_endpoint.py"))) | toJson | quote }}
+  source-revision: {{ .Values.nativeRuntime.ranEvidence | toJson | sha256sum | quote }}
+{{- end }}

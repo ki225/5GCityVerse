@@ -11,6 +11,36 @@
 {{- end -}}
 {{- end -}}
 
+{{/* Read-only Pod-local endpoint; implementation remains in the backend-owned source CM. */}}
+{{- define "cityverse.ranEvidenceContainer" -}}
+{{- $root := index . 0 -}}
+{{- $role := index . 1 -}}
+name: {{ $role }}-evidence
+image: {{ $root.Values.images.ranEvidence }}
+imagePullPolicy: IfNotPresent
+workingDir: /opt/cityverse
+command: [python, -m, backend.onprem.api.evidence_endpoint]
+args: [--role, {{ $role }}, --host, "$(POD_IP)", --port, "9083"]
+env:
+  - {name: POD_IP, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
+  - {name: POD_UID, valueFrom: {fieldRef: {fieldPath: metadata.uid}}}
+  - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+ports: [{name: ran-evidence, containerPort: 9083, protocol: TCP}]
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+resources: {{ $root.Values.nativeRuntime.ranEvidence.resources | toYaml | nindent 2 }}
+readinessProbe: {httpGet: {path: /healthz, port: 9083}, periodSeconds: 5, timeoutSeconds: 1}
+volumeMounts:
+  - {name: ran-evidence-source, mountPath: /opt/cityverse/backend, readOnly: true}
+  {{- if eq $role "gnb" }}
+  - {name: config, mountPath: /etc/cityverse, readOnly: true}
+  {{- end }}
+{{- end -}}
+
 {{- define "cityverse.ranSelector" -}}
 {{- $root := index . 0 -}}
 {{- $gnb := index . 1 -}}
