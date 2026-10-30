@@ -1,0 +1,520 @@
+# Official chart values plus the city data plane. No application source is embedded.
+free5gc:
+  deploySmf: false
+  deployUpf: false
+  deployNssf: false
+  deployN3iwf: false
+  deployNef: false
+  deployChf: false
+  deployDbPython: false
+  mongodb:
+    useStatefulSet: true
+    extraDeploy: []
+    nodeSelector:
+      cityverse.io/site: central
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: cityverse-local
+    image:
+      digest: sha256:62fb92d0111f8dc0565b7daf8a57279fd09520020b79fd3bc550deb3ae5aee70
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: '2'
+        memory: 768Mi
+    # Official chart's tini bootstrap, with its container image pinned.
+    # Requires outbound Debian package access on a fresh deployment.
+    initContainers:
+      - name: install-tini
+        image: debian:12-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+        command: [sh, -ec, "apt-get update && apt-get install -y --no-install-recommends tini && cp /usr/bin/tini /tmp/tini"]
+        volumeMounts: [{name: tini-volume, mountPath: /tmp}]
+    podAnnotations:
+      cityverse.io/site: central
+  free5gc-amf:
+    amf:
+      nodeSelector:
+        cityverse.io/site: distributed
+      image:
+        tag: v4.2.2@sha256:8fc343349f7b0d55a257ecae328bff4e2d4b6800004ed932c128b2699a3860e7
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+      configuration:
+        configuration: |
+          amfName: AMF
+          servedGuamiList:
+          - plmnId: &id001
+              mcc: '208'
+              mnc: '93'
+            amfId: cafe00
+          supportTaiList:
+          - plmnId: *id001
+            tac: '000001'
+          plmnSupportList:
+          - plmnId: *id001
+            snssaiList:
+            - sst: 1
+              sd: '000001'
+            - sst: 2
+              sd: '000002'
+            - sst: 3
+              sd: '000004'
+            - sst: 4
+              sd: '000005'
+          supportDnnList:
+          - internet
+          security:
+            integrityOrder:
+            - NIA2
+            cipheringOrder:
+            - NEA0
+          networkName:
+            full: free5GC
+            short: free
+          ngapIE:
+            mobilityRestrictionList:
+              enable: true
+            maskedIMEISV:
+              enable: true
+            redirectionVoiceFallback:
+              enable: false
+          nasIE:
+            networkFeatureSupport5GS:
+              enable: true
+              length: 1
+              imsVoPS: 0
+              emc: 0
+              emf: 0
+              iwkN26: 0
+              mpsi: 0
+              emcN3: 0
+              mcsi: 0
+          t3502Value: 720
+          t3512Value: 3600
+          non3gppDeregTimerValue: 3240
+          t3513:
+            enable: true
+            expireTime: 6s
+            maxRetryTimes: 4
+          t3522:
+            enable: true
+            expireTime: 6s
+            maxRetryTimes: 4
+          t3550:
+            enable: true
+            expireTime: 6s
+            maxRetryTimes: 4
+          t3555:
+            enable: true
+            expireTime: 6s
+            maxRetryTimes: 4
+          t3560:
+            enable: true
+            expireTime: 6s
+            maxRetryTimes: 4
+          t3565:
+            enable: true
+            expireTime: 6s
+            maxRetryTimes: 4
+          t3570:
+            enable: true
+            expireTime: 6s
+            maxRetryTimes: 4
+          locality: area1
+          sctp:
+            numOstreams: 3
+            maxInstreams: 5
+            maxAttempts: 2
+            maxInitTimeout: 2
+          defaultUECtxReq: false
+      podAnnotations:
+        k8s.v1.cni.cncf.io/networks: '[{"name": "n2", "interface": "n2", "ips": ["172.22.2.10/24"]}]'
+        cityverse.io/site: distributed
+    initcontainers:
+      curl:
+        tag: 8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+      busybox:
+        tag: 1.32.0@sha256:bde48e1751173b709090c2539fdf12d6ba64e88ec7a4301591227ce925f3c678
+  free5gc-ausf:
+    ausf:
+      nodeSelector:
+        cityverse.io/site: central
+      image:
+        tag: v4.2.2@sha256:ec2752692a10c879cbe9c76d27377794bb26774abbb776e5a59df1f7eded3bf7
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+      podAnnotations:
+        cityverse.io/site: central
+    initcontainers:
+      curl:
+        tag: 8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+      busybox:
+        tag: 1.32.0@sha256:bde48e1751173b709090c2539fdf12d6ba64e88ec7a4301591227ce925f3c678
+  free5gc-nrf:
+    nrf:
+      nodeSelector:
+        cityverse.io/site: central
+      image:
+        tag: v4.2.2@sha256:0811f4af5038ad9fc366321cbc104910dfb09503a50d08a9184850980419e0d9
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+      readinessProbe:
+        enabled: false
+      podAnnotations:
+        cityverse.io/site: central
+    initcontainers:
+      curl:
+        tag: 8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+      busybox:
+        tag: 1.32.0@sha256:bde48e1751173b709090c2539fdf12d6ba64e88ec7a4301591227ce925f3c678
+    db:
+      enabled: false
+  free5gc-pcf:
+    pcf:
+      nodeSelector:
+        cityverse.io/site: central
+      image:
+        tag: v4.2.2@sha256:b6208c82a02917cb6d620336d1245c00d875254e2c9bd28416c2e250a43453a4
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+      podAnnotations:
+        cityverse.io/site: central
+    initcontainers:
+      curl:
+        tag: 8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+      busybox:
+        tag: 1.32.0@sha256:bde48e1751173b709090c2539fdf12d6ba64e88ec7a4301591227ce925f3c678
+  free5gc-udm:
+    udm:
+      nodeSelector:
+        cityverse.io/site: central
+      image:
+        tag: v4.2.2@sha256:3c0ea07415976e01352a4d6ca65d29dfb253247548e873decb6f45246da75562
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+      podAnnotations:
+        cityverse.io/site: central
+    initcontainers:
+      curl:
+        tag: 8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+      busybox:
+        tag: 1.32.0@sha256:bde48e1751173b709090c2539fdf12d6ba64e88ec7a4301591227ce925f3c678
+  free5gc-udr:
+    udr:
+      nodeSelector:
+        cityverse.io/site: central
+      image:
+        tag: v4.2.2@sha256:955b91fc7b5082e8732b578fb0df729ed730a8ae4c196304e03f946965a1eb85
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+      podAnnotations:
+        cityverse.io/site: central
+    initcontainers:
+      curl:
+        tag: 8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+      busybox:
+        tag: 1.32.0@sha256:bde48e1751173b709090c2539fdf12d6ba64e88ec7a4301591227ce925f3c678
+  free5gc-webui:
+    webui:
+      nodeSelector:
+        cityverse.io/site: central
+      image:
+        tag: v4.2.2@sha256:170842263d72bcc7a8caa88ac31ebd8c6c5b2828f2159a9198d7c83066b7497d
+      service:
+        type: ClusterIP
+        nodePort: null
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+      podAnnotations:
+        cityverse.io/site: central
+    initcontainers:
+      curl:
+        tag: 8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+      busybox:
+        tag: 1.32.0@sha256:bde48e1751173b709090c2539fdf12d6ba64e88ec7a4301591227ce925f3c678
+  global:
+    amf:
+      multus:
+        enabled: true
+        n2if:
+          ipAddress: 172.22.2.10
+        n2network:
+          enabled: false
+          name: n2
+          cidr: 24
+          gatewayIP: 172.22.2.1
+      service:
+        ngap:
+          enabled: false
+city:
+  # N3 transport emulation; processing is an illustrative transport budget,
+  # separate from fibre propagation. Rendered as a plan, applied explicitly.
+  transportDelay:
+    enabled: true
+    fibreUsPerKm: 5
+    routeStretch: 1.3
+    processingUs: {edge: 250, distributed: 1000, central: 4000}
+  schemaVersion: cityverse.city-infra/v1
+  map:
+    widthKm: 24
+    heightKm: 24
+  sites:
+    central:
+      tier: central
+      position:
+      - 12
+      - 112
+      relativeCapacity: 16
+    distributed:
+      tier: distributed
+      position:
+      - 12
+      - 12
+      relativeCapacity: 4
+    distributed-north:
+      tier: distributed
+      position:
+      - 12
+      - 5
+      relativeCapacity: 4
+    distributed-south:
+      tier: distributed
+      position:
+      - 12
+      - 19
+      relativeCapacity: 4
+    edge-nw:
+      tier: edge
+      position:
+      - 6
+      - 6
+      relativeCapacity: 1
+    edge-ne:
+      tier: edge
+      position:
+      - 18
+      - 6
+      relativeCapacity: 1
+    edge-sw:
+      tier: edge
+      position:
+      - 6
+      - 18
+      relativeCapacity: 1
+    edge-se:
+      tier: edge
+      position:
+      - 18
+      - 18
+      relativeCapacity: 1
+  core:
+    smf:
+      site: distributed
+      resources: &id001
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: '2'
+          memory: 256Mi
+    nssf:
+      site: central
+      resources: *id001
+  slices:
+    embb:
+      site: distributed-north
+      resources: &id002
+        requests:
+          cpu: 300m
+          memory: 256Mi
+        limits:
+          cpu: '2'
+          memory: 1Gi
+      sst: 1
+      sd: '000001'
+      uePool: 10.101.0.0/21
+      n3Subnet: 172.22.31
+      n4Address: 172.22.4.21
+      n6Subnet: 172.22.61
+    urllc:
+      site: distributed
+      resources: *id002
+      sst: 2
+      sd: '000002'
+      uePool: 10.102.0.0/21
+      n3Subnet: 172.22.32
+      n4Address: 172.22.4.22
+      n6Subnet: 172.22.62
+    mmtc:
+      site: central
+      resources: *id002
+      sst: 3
+      sd: '000004'
+      uePool: 10.103.0.0/21
+      n3Subnet: 172.22.33
+      n4Address: 172.22.4.23
+      n6Subnet: 172.22.63
+    v2x:
+      site: distributed-south
+      resources: *id002
+      sst: 4
+      sd: '000005'
+      uePool: 10.104.0.0/21
+      n3Subnet: 172.22.34
+      n4Address: 172.22.4.24
+      n6Subnet: 172.22.64
+  gnbs:
+  - id: gnb-0-0
+    workload: gnb-embb
+    position:
+    - 3
+    - 6
+    slice: embb
+    networkIndex: 1
+    n3Host: 31
+    scenario: residential
+  - id: gnb-0-1
+    workload: gnb-urllc
+    position:
+    - 9
+    - 9
+    slice: urllc
+    networkIndex: 2
+    n3Host: 31
+    scenario: mobile-medical
+  - id: gnb-0-2
+    workload: gnb-concert
+    position:
+    - 15
+    - 3
+    slice: embb
+    networkIndex: 5
+    n3Host: 35
+    scenario: concert
+  - id: gnb-0-3
+    workload: gnb-commerce
+    position:
+    - 21
+    - 9
+    slice: embb
+    networkIndex: 6
+    n3Host: 36
+    scenario: commerce
+  - id: gnb-0-4
+    workload: gnb-mmtc
+    position:
+    - 3
+    - 18
+    slice: mmtc
+    networkIndex: 3
+    n3Host: 31
+    scenario: industry-port
+  - id: gnb-0-5
+    workload: gnb-v2x
+    position:
+    - 6
+    - 21
+    slice: v2x
+    networkIndex: 4
+    n3Host: 31
+    scenario: transit-west
+  - id: gnb-0-6
+    workload: gnb-transit
+    position:
+    - 21
+    - 18
+    slice: v2x
+    networkIndex: 7
+    n3Host: 37
+    scenario: transit-east
+  gnbResources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: '1'
+      memory: 512Mi
+  scenarios:
+    concert:
+      gnb: gnb-concert
+      buildingId: arena
+      slice: embb
+      credentialGroup: 0
+      ueCount: 1
+      pingTarget: 172.22.61.20
+      trafficMbps: 5
+      durationSeconds: 10
+    industrial-central:
+      gnb: gnb-mmtc
+      buildingId: factory-0
+      slice: mmtc
+      credentialGroup: 2
+      ueCount: 1
+      pingTarget: 172.22.63.20
+      trafficMbps: 1
+      durationSeconds: 10
+  placement:
+    mode: physical
+    nodeSelector: {}
+networks:
+  n2: cv-n2
+  n4: cv-n4
+  n3-embb: cv-n3-embb
+  n3-urllc: cv-n3-urllc
+  n3-mmtc: cv-n3-mmtc
+  n3-v2x: cv-n3-v2x
+  n6-embb: cv-n6-embb
+  n6-urllc: cv-n6-urllc
+  n6-mmtc: cv-n6-mmtc
+  n6-v2x: cv-n6-v2x
+images:
+  smf: docker.io/cityverse/free5gc-smf@sha256:4eb3b03d2c85c3c3f9f7d64a34ea4251c828b043b90d0b70c09710b9d643472a
+  nssf: free5gc/nssf:v4.2.2@sha256:beea02cca34919f86b6711cc901a008701b790cfccf3fd64d712590bb646af87
+  upf: free5gc/upf:v4.2.2@sha256:a9fa3ed6683f4390922cef122dd7c67ed6fb8674340abf7df73f7f47d47a7e04
+  gnb: docker.io/cityverse/free-ran-ue@sha256:be15100a4ce6fa74161ee982657d3f61ff4438b11378160992a7b09a32682228
+  curl: curlimages/curl:8.7.1@sha256:25d29daeb9b14b89e2fa8cc17c70e4b188bca1466086907c2d9a4b56b59d8e21
+  probe: busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+  traffic: networkstatic/iperf3@sha256:c1e4a239a83d1d60975bce1c9b7661af5517e362bf335f66a2c5b6adaeb4f19f
+traffic:
+  enabled: true
+  resources:
+    requests: {cpu: 25m, memory: 256Mi}
+    limits: {cpu: '4', memory: 2Gi}

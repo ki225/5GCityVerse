@@ -1,0 +1,10 @@
+{{- range $name, $master := .Values.networks }}
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  config: {{ dict "cniVersion" "0.3.1" "type" "ipvlan" "master" $master "mode" "l2" "ipam" (dict "type" "static") | toJson | quote }}
+{{- end }}

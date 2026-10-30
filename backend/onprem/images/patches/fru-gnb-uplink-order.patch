@@ -1,0 +1,317 @@
+diff --git a/gnb/gnb.go b/gnb/gnb.go
+--- a/gnb/gnb.go
++++ b/gnb/gnb.go
+@@ -9,6 +9,7 @@
+ 	"net/http"
+ 	"strconv"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	consoleModel "github.com/free-ran-ue/free-ran-ue/v2/console/model"
+@@ -88,7 +89,10 @@
+ 	addressToUe           sync.Map // UDP address -> *(Ran/Xn)Ue
+ 	imsiTodlTeidAndUeType sync.Map // imsi -> dlTeidAndUeType
+ 
+-	gtpChannel chan []byte
++	gtpChannel  chan []byte
++	uplink      *orderedUplink
++	dataPlaneWG sync.WaitGroup
++	uplinkDrops atomic.Uint64
+ 
+ 	ranUeNgapIdGenerator *RanUeNgapIdGenerator
+ 	teidGenerator        *TeidGenerator
+@@ -273,6 +277,10 @@
+ 
+ 	g.startGtpProcessor(ctx)
+ 
++	g.uplink = newOrderedUplink(ctx, uplinkLaneCount, uplinkLaneDepth, func(packet uplinkDatagram) {
++		g.handleUeDataPlanePacket(packet.address, packet.payload)
++	})
++	g.dataPlaneWG.Add(1)
+ 	go g.startDataPlaneProcessor()
+ 
+ 	go func() {
+@@ -328,8 +336,10 @@
+ 
+ 	if err := g.ranDataPlaneServer.Close(); err != nil {
+ 		g.RanLog.Errorf("Error stopping ran data plane listener: %v", err)
+-		return
+-	}
++	}
++	g.uplink.cancel()
++	g.dataPlaneWG.Wait()
++	g.uplink.wait()
+ 	g.RanLog.Debugln("ran data plane listener stopped")
+ 	g.RanLog.Tracef("ran data plane listener stopped at %s:%d", g.ranDataPlaneIp, g.ranDataPlanePort)
+ 
+@@ -621,6 +631,7 @@
+ }
+ 
+ func (g *Gnb) startDataPlaneProcessor() {
++	defer g.dataPlaneWG.Done()
+ 	buffer := make([]byte, 4096)
+ 	for {
+ 		n, ueAddress, err := g.ranDataPlaneServer.ReadFromUDP(buffer)
+@@ -638,9 +649,18 @@
+ 		tmp := make([]byte, n)
+ 		copy(tmp, buffer[:n])
+ 		if n > len(constant.UE_DATA_PLANE_INITIAL_PACKET) && string(tmp[:len(constant.UE_DATA_PLANE_INITIAL_PACKET)]) == constant.UE_DATA_PLANE_INITIAL_PACKET {
+-			go g.handleUeDataPlaneInitialPacket(ueAddress, string(tmp[len(constant.UE_DATA_PLANE_INITIAL_PACKET)+1:n]))
++			g.dataPlaneWG.Add(1)
++			go func() {
++				defer g.dataPlaneWG.Done()
++				g.handleUeDataPlaneInitialPacket(ueAddress, string(tmp[len(constant.UE_DATA_PLANE_INITIAL_PACKET)+1:n]))
++			}()
+ 		} else {
+-			go g.handleUeDataPlanePacket(ueAddress, tmp)
++			if !g.uplink.enqueue(uplinkDatagram{address: ueAddress, payload: tmp}) {
++				drops := g.uplinkDrops.Add(1)
++				if drops == 1 || drops%1000 == 0 {
++					g.RanLog.Warnf("Dropping UE uplink packet from %s: queue full or stopping (total %d)", ueAddress, drops)
++				}
++			}
+ 		}
+ 	}
+ }
+@@ -648,13 +668,20 @@
+ func (g *Gnb) handleUeDataPlaneInitialPacket(ueAddress *net.UDPAddr, imsi string) {
+ 	var dlTeidAndUeTypeInstance dlTeidAndUeType
+ 	for try := 0; ; try += 1 {
++		if g.uplink.ctx.Err() != nil {
++			return
++		}
+ 		dlTeidAndUeTypeValue, exists := g.imsiTodlTeidAndUeType.Load(imsi)
+ 		if !exists {
+ 			if try == 100 {
+ 				g.RanLog.Errorf("No DL TEID and UE type found for IMSI: %s", imsi)
+ 				return
+ 			}
+-			time.Sleep(100 * time.Millisecond)
++			select {
++			case <-g.uplink.ctx.Done():
++				return
++			case <-time.After(100 * time.Millisecond):
++			}
+ 		} else {
+ 			dlTeidAndUeTypeInstance = dlTeidAndUeTypeValue.(dlTeidAndUeType)
+ 			break
+@@ -690,9 +717,9 @@
+ 
+ 	switch u := ue.(type) {
+ 	case *RanUe:
+-		go formatGtpPacketAndWriteToGtpChannel(u.GetUlTeid(), buffer, g.gtpChannel, g.GnbLogger)
++		formatGtpPacketAndWriteToGtpChannel(g.uplink.ctx, u.GetUlTeid(), buffer, g.gtpChannel, g.GnbLogger)
+ 	case *XnUe:
+-		go formatGtpPacketAndWriteToGtpChannel(u.GetUlTeid(), buffer, g.gtpChannel, g.GnbLogger)
++		formatGtpPacketAndWriteToGtpChannel(g.uplink.ctx, u.GetUlTeid(), buffer, g.gtpChannel, g.GnbLogger)
+ 	}
+ }
+ 
+diff --git a/gnb/gtp.go b/gnb/gtp.go
+--- a/gnb/gtp.go
++++ b/gnb/gtp.go
+@@ -82,7 +82,10 @@
+ 		case <-ctx.Done():
+ 			gnbLogger.GtpLog.Debugln("Forward GTP packet to N3 connection stopped")
+ 			return
+-		case packet := <-gtpChannel:
++		case packet, ok := <-gtpChannel:
++			if !ok {
++				return
++			}
+ 			n, err := n3Conn.Write(packet)
+ 			if err != nil {
+ 				gnbLogger.GtpLog.Errorf("Error writing GTP packet to N3 connection: %v", err)
+@@ -115,7 +118,7 @@
+ }
+ 
+ // format GTP packet and write to gtpChannel
+-func formatGtpPacketAndWriteToGtpChannel(teid aper.OctetString, packet []byte, gtpChannel chan []byte, gnbLogger *logger.GnbLogger) {
++func formatGtpPacketAndWriteToGtpChannel(ctx context.Context, teid aper.OctetString, packet []byte, gtpChannel chan []byte, gnbLogger *logger.GnbLogger) {
+ 	gtpHeader := make([]byte, 12)
+ 
+ 	gtpHeader[0] = 0x32
+@@ -127,7 +130,11 @@
+ 	gtpPacket := append(gtpHeader, packet...)
+ 	gnbLogger.GtpLog.Tracef("Formatted GTP packet: %+v", gtpPacket)
+ 
+-	gtpChannel <- gtpPacket
++	select {
++	case gtpChannel <- gtpPacket:
++	case <-ctx.Done():
++		return
++	}
+ 	gnbLogger.GtpLog.Tracef("Wrote %d bytes of GTP packet to gtpChannel", len(gtpPacket))
+ 	gnbLogger.GtpLog.Debugln("Wrote GTP packet to gtpChannel")
+ }
+diff --git a/gnb/ordered_uplink.go b/gnb/ordered_uplink.go
+new file mode 100644
+--- /dev/null
++++ b/gnb/ordered_uplink.go
+@@ -0,0 +1,77 @@
++package gnb
++
++import (
++	"context"
++	"hash/fnv"
++	"net"
++	"sync"
++)
++
++const (
++	uplinkLaneCount = 64
++	uplinkLaneDepth = 128
++)
++
++type uplinkDatagram struct {
++	address *net.UDPAddr
++	payload []byte
++}
++
++// orderedUplink keeps each UE address on one FIFO worker while bounding both
++// worker and queued packet counts. Different addresses can use different lanes.
++type orderedUplink struct {
++	ctx    context.Context
++	cancel context.CancelFunc
++	lanes  []chan uplinkDatagram
++	wg     sync.WaitGroup
++}
++
++func newOrderedUplink(parent context.Context, laneCount, laneDepth int, process func(uplinkDatagram)) *orderedUplink {
++	ctx, cancel := context.WithCancel(parent)
++	u := &orderedUplink{
++		ctx:    ctx,
++		cancel: cancel,
++		lanes:  make([]chan uplinkDatagram, laneCount),
++	}
++	for i := range u.lanes {
++		lane := make(chan uplinkDatagram, laneDepth)
++		u.lanes[i] = lane
++		u.wg.Add(1)
++		go func() {
++			defer u.wg.Done()
++			for {
++				select {
++				case <-ctx.Done():
++					return
++				case packet := <-lane:
++					if ctx.Err() != nil {
++						return
++					}
++					process(packet)
++				}
++			}
++		}()
++	}
++	return u
++}
++
++func (u *orderedUplink) enqueue(packet uplinkDatagram) bool {
++	if u.ctx.Err() != nil {
++		return false
++	}
++	hash := fnv.New32a()
++	_, _ = hash.Write([]byte(packet.address.String()))
++	lane := u.lanes[int(hash.Sum32())%len(u.lanes)]
++	select {
++	case <-u.ctx.Done():
++		return false
++	case lane <- packet:
++		return true
++	default:
++		return false
++	}
++}
++
++func (u *orderedUplink) wait() {
++	u.wg.Wait()
++}
+diff --git a/gnb/ordered_uplink_test.go b/gnb/ordered_uplink_test.go
+new file mode 100644
+--- /dev/null
++++ b/gnb/ordered_uplink_test.go
+@@ -0,0 +1,83 @@
++package gnb
++
++import (
++	"context"
++	"net"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestOrderedUplinkPreservesAddressOrder(t *testing.T) {
++	var mu sync.Mutex
++	got := make([]byte, 0, 200)
++	done := make(chan struct{})
++	u := newOrderedUplink(context.Background(), 4, 256, func(packet uplinkDatagram) {
++		mu.Lock()
++		got = append(got, packet.payload[0])
++		if len(got) == 200 {
++			close(done)
++		}
++		mu.Unlock()
++	})
++	defer func() { u.cancel(); u.wait() }()
++	address := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 10001}
++	for i := 0; i < 200; i++ {
++		if !u.enqueue(uplinkDatagram{address: address, payload: []byte{byte(i)}}) {
++			t.Fatalf("packet %d rejected", i)
++		}
++	}
++	select {
++	case <-done:
++	case <-time.After(2 * time.Second):
++		t.Fatal("ordered worker did not drain packets")
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	for i, value := range got {
++		if value != byte(i) {
++			t.Fatalf("packet %d arrived as %d", i, value)
++		}
++	}
++}
++
++func TestOrderedUplinkOtherLaneProgressAndBoundedQueue(t *testing.T) {
++	first := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 10001}
++	second := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 10002}
++	started := make(chan struct{})
++	release := make(chan struct{})
++	otherDone := make(chan struct{})
++	u := newOrderedUplink(context.Background(), 64, 1, func(packet uplinkDatagram) {
++		if packet.address.String() == first.String() {
++			if packet.payload[0] == 1 {
++				close(started)
++				<-release
++			}
++			return
++		}
++		close(otherDone)
++	})
++	defer func() { close(release); u.cancel(); u.wait() }()
++	if !u.enqueue(uplinkDatagram{address: first, payload: []byte{1}}) {
++		t.Fatal("first packet rejected")
++	}
++	select {
++	case <-started:
++	case <-time.After(2 * time.Second):
++		t.Fatal("first lane did not start")
++	}
++	if !u.enqueue(uplinkDatagram{address: first, payload: []byte{2}}) {
++		t.Fatal("bounded lane should hold one queued packet")
++	}
++	if u.enqueue(uplinkDatagram{address: first, payload: []byte{3}}) {
++		t.Fatal("bounded lane accepted packet beyond capacity")
++	}
++	if !u.enqueue(uplinkDatagram{address: second, payload: []byte{4}}) {
++		t.Fatal("second UE packet rejected")
++	}
++	select {
++	case <-otherDone:
++	case <-time.After(2 * time.Second):
++		t.Fatal("other UE did not progress while first UE was blocked")
++	}
++}

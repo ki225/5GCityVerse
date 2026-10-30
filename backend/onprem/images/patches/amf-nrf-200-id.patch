@@ -1,0 +1,28 @@
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -227,7 +227,7 @@ func (a *AmfApp) Start() {
+ 	if err_reg != nil {
+ 		logger.InitLog.Warnf("Send Register NF Instance failed: %+v", err_reg)
+ 	} else {
+-		a.Context().NfId = nfId
++		a.Context().NfId = registeredNfID(a.Context().NfId, nfId)
+ 	}
+ 
+ 	if err := a.sbiServer.Run(context.Background(), &a.wg); err != nil {
+@@ -236,6 +236,15 @@ func (a *AmfApp) Start() {
+ 	a.WaitRoutineStopped()
+ }
+ 
++func registeredNfID(currentID, returnedID string) string {
++	// NRF's 200 update response has no Location; an empty returned ID must
++	// not erase the stable instance ID used in subsequent SBI requests.
++	if returnedID == "" {
++		return currentID
++	}
++	return returnedID
++}
++
+ // Used in AMF planned removal procedure
+ func (a *AmfApp) Terminate() {
+ 	a.cancel()

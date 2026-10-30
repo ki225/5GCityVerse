@@ -1,0 +1,66 @@
+diff --git a/internal/sbi/consumer/udr_service.go b/internal/sbi/consumer/udr_service.go
+--- a/internal/sbi/consumer/udr_service.go
++++ b/internal/sbi/consumer/udr_service.go
+@@ -87,7 +87,9 @@
+ 		Snssai: sliceInfo,
+ 		Dnn:    &dnn,
+ 	}
+-	resp, localErr := client.SessionManagementPolicyDataDocumentApi.ReadSessionManagementPolicyData(ctx, &param)
++	resp, localErr := udrReadWithSetupRetry(ctx, func() (*DataRepository.ReadSessionManagementPolicyDataResponse, error) {
++		return client.SessionManagementPolicyDataDocumentApi.ReadSessionManagementPolicyData(ctx, &param)
++	})
+ 	if localErr == nil {
+ 		return resp, nil, nil
+ 	}
+@@ -243,7 +245,9 @@
+ 	param := DataRepository.ReadAccessAndMobilityPolicyDataRequest{
+ 		UeId: &ue.Supi,
+ 	}
+-	resp, localErr := client.AccessAndMobilityPolicyDataDocumentApi.ReadAccessAndMobilityPolicyData(ctx, &param)
++	resp, localErr := udrReadWithSetupRetry(ctx, func() (*DataRepository.ReadAccessAndMobilityPolicyDataResponse, error) {
++		return client.AccessAndMobilityPolicyDataDocumentApi.ReadAccessAndMobilityPolicyData(ctx, &param)
++	})
+ 	if localErr == nil {
+ 		return &resp.AmPolicyData, nil, nil
+ 	}
+diff --git a/internal/sbi/consumer/udr_read_retry.go b/internal/sbi/consumer/udr_read_retry.go
+new file mode 100644
+--- /dev/null
++++ b/internal/sbi/consumer/udr_read_retry.go
+@@ -0,0 +1,36 @@
++package consumer
++
++import (
++	"context"
++	"errors"
++	"net/url"
++	"strings"
++	"time"
++)
++
++// Only the two idempotent policy-data GET callers use this helper.
++// HTTP responses and policy mutations retain their original handling.
++func udrReadWithSetupRetry[T any](ctx context.Context, request func() (T, error)) (result T, err error) {
++	for attempt := 0; attempt < 3; attempt++ {
++		if err = ctx.Err(); err != nil {
++			return
++		}
++		result, err = request()
++		if err == nil || attempt == 2 {
++			return
++		}
++		var transportError *url.Error
++		if !errors.As(err, &transportError) || !strings.Contains(transportError.Err.Error(), "http2: client conn could not be established") {
++			return
++		}
++		timer := time.NewTimer(time.Duration(attempt+1) * 50 * time.Millisecond)
++		select {
++		case <-ctx.Done():
++			timer.Stop()
++			err = ctx.Err()
++			return
++		case <-timer.C:
++		}
++	}
++	return
++}

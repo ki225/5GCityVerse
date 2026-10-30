@@ -1,0 +1,81 @@
+--- a/internal/ngap/message/build.go
++++ b/internal/ngap/message/build.go
+@@ -1268,7 +1268,7 @@
+ 		initialContextSetupRequestIEs.List = append(initialContextSetupRequestIEs.List, ie)
+ 	}
+ 
+-	return ngap.Encoder(pdu)
++	return encodeInitialContextSetupDiagnostic(pdu)
+ }
+ 
+ func BuildUEContextModificationRequest(
+@@ -3215,3 +3215,21 @@
+ 
+ 	return ngap.Encoder(pdu)
+ }
++
++// encodeInitialContextSetupDiagnostic preserves the full packet and its error.
++// Isolated IE encodings run only after failure, solely to identify the invalid
++// field. No partial packet is returned or transmitted, and no UE data is logged.
++func encodeInitialContextSetupDiagnostic(pdu ngapType.NGAPPDU) ([]byte, error) {
++    encoded, err := ngap.Encoder(pdu)
++    if err == nil { return encoded, nil }
++    request := pdu.InitiatingMessage.Value.InitialContextSetupRequest
++    all := request.ProtocolIEs.List
++    defer func() { request.ProtocolIEs.List = all }()
++    for _, ie := range all {
++        request.ProtocolIEs.List = []ngapType.InitialContextSetupRequestIEs{ie}
++        if _, fieldErr := ngap.Encoder(pdu); fieldErr != nil {
++            return nil, fmt.Errorf("initial_context_setup.ie_%d: %w", ie.Id.Value, err)
++        }
++    }
++    return nil, fmt.Errorf("initial_context_setup.unclassified: %w", err)
++}
+--- /dev/null
++++ b/internal/ngap/message/initial_context_diagnostic_test.go
+@@ -0,0 +1,45 @@
++package message
++
++import (
++ "strings"
++ "testing"
++ "github.com/free5gc/amf/internal/context"
++ "github.com/free5gc/amf/pkg/factory"
++ "github.com/free5gc/nas/nasType"
++ "github.com/free5gc/ngap"
++ "github.com/free5gc/ngap/ngapType"
++ "github.com/free5gc/openapi/models"
++)
++
++func TestInitialContextSetupWireDiagnostic(t *testing.T) {
++ oldConfig := factory.AmfConfig
++ factory.AmfConfig = &factory.Config{Configuration:&factory.Configuration{}}
++ defer func(){factory.AmfConfig=oldConfig}()
++ self:=context.GetSelf()
++ oldGuami:=self.ServedGuamiList
++ self.ServedGuamiList=[]models.Guami{{PlmnId:&models.PlmnIdNid{Mcc:"208",Mnc:"93"},AmfId:"cafe00"}}
++ defer func(){self.ServedGuamiList=oldGuami}()
++ access:=models.AccessType__3_GPP_ACCESS
++ for _, empty :=range []bool{false,true} {
++  ue:=&context.AmfUe{Kgnb:make([]byte,32),
++    UESecurityCapability:nasType.UESecurityCapability{Buffer:[]byte{0x80,0x80}},
++    RanUe:map[models.AccessType]*context.RanUe{access:{AmfUeNgapId:1,RanUeNgapId:1,Ran:&context.AmfRan{AnType:access}}},
++    AllowedNssai:map[models.AccessType][]models.AllowedSnssai{}}
++  if !empty {ue.AllowedNssai[access]=[]models.AllowedSnssai{{AllowedSnssai:&models.Snssai{Sst:3,Sd:"000004"}}}}
++  raw,err:=BuildInitialContextSetupRequest(ue,access,[]byte{0x7e,0,0x42},nil,nil,nil,nil)
++  if empty {
++   if err==nil || len(raw)!=0 || !strings.Contains(err.Error(),"initial_context_setup.ie_0:") || !strings.Contains(err.Error(),"lowerbound") {
++    t.Fatalf("empty mandatory AllowedNSSAI must identify its IE and return no packet: %v",err)
++   }
++  } else {
++   if err!=nil {t.Fatal(err)}
++   decoded,decodeErr:=ngap.Decoder(raw)
++   if decodeErr!=nil {t.Fatal(decodeErr)}
++   found:=false
++   for _,ie:=range decoded.InitiatingMessage.Value.InitialContextSetupRequest.ProtocolIEs.List {
++    if ie.Id.Value==ngapType.ProtocolIEIDAllowedNSSAI {found=len(ie.Value.AllowedNSSAI.List)==1}
++   }
++   if !found {t.Fatal("valid full packet lost AllowedNSSAI")}
++  }
++ }
++}

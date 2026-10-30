@@ -1,0 +1,126 @@
+diff --git a/internal/context/amf_ue.go b/internal/context/amf_ue.go
+--- a/internal/context/amf_ue.go
++++ b/internal/context/amf_ue.go
+@@ -331,7 +331,7 @@ func (ue *AmfUe) Remove() {
+ 	}
+ 	tmsiGenerator.FreeID(int64(ue.Tmsi))
+ 	if len(ue.Supi) > 0 {
+-		GetSelf().UePool.Delete(ue.Supi)
++		GetSelf().UePool.CompareAndDelete(ue.Supi, ue)
+ 	}
+ 	ue.DeleteAllSmContexts()
+ 
+diff --git a/internal/context/cityverse_stale_remove_test.go b/internal/context/cityverse_stale_remove_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/context/cityverse_stale_remove_test.go
+@@ -0,0 +1,28 @@
++package context
++
++import "testing"
++
++// Derived from free5gc/amf PR #240 (open/unmerged), adapted to release pin.
++func TestCityverseStaleRemoveKeepsReplacement(t *testing.T) {
++	self := GetSelf()
++	oldUE := &AmfUe{Supi: "imsi-208930100009001"}
++	newUE := &AmfUe{Supi: oldUE.Supi}
++	self.UePool.Store(newUE.Supi, newUE)
++	t.Cleanup(func() { self.UePool.CompareAndDelete(newUE.Supi, newUE) })
++	oldUE.Remove()
++	got, ok := self.AmfUeFindBySupi(newUE.Supi)
++	if !ok || got != newUE {
++		t.Fatal("stale removal deleted or replaced the newer SUPI owner")
++	}
++}
++
++func TestCityverseCurrentRemoveDeletesOwnEntry(t *testing.T) {
++	self := GetSelf()
++	ue := &AmfUe{Supi: "imsi-208930100009002"}
++	self.UePool.Store(ue.Supi, ue)
++	t.Cleanup(func() { self.UePool.CompareAndDelete(ue.Supi, ue) })
++	ue.Remove()
++	if _, ok := self.AmfUeFindBySupi(ue.Supi); ok {
++		t.Fatal("normal removal retained its own SUPI entry")
++	}
++}
+diff --git a/internal/gmm/common/cityverse_stale_remove_test.go b/internal/gmm/common/cityverse_stale_remove_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/gmm/common/cityverse_stale_remove_test.go
+@@ -0,0 +1,76 @@
++package common
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++
++	"github.com/free5gc/amf/internal/context"
++	"github.com/free5gc/amf/internal/logger"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/util/fsm"
++)
++
++// Models an old SecurityMode context which never completed communicateWithUDM.
++// This is a source-path fixture, not a reconstruction of historical heap flags.
++func TestCityverseIncompleteOldRemovePreservesRegisteredOwnerWithoutNFWrites(t *testing.T) {
++	var requests atomic.Int32
++	nf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests.Add(1)
++		w.WriteHeader(http.StatusInternalServerError)
++	}))
++	defer nf.Close()
++	access := models.AccessType__3_GPP_ACCESS
++	oldUE := &context.AmfUe{
++		Supi: "imsi-208930100009003",
++		ContextValid: false,
++		UeCmRegistered: map[models.AccessType]bool{},
++		RanUe: map[models.AccessType]*context.RanUe{},
++		State: map[models.AccessType]*fsm.State{access: fsm.NewState(context.SecurityMode)},
++		NudmUECMUri: nf.URL, NudmSDMUri: nf.URL, PcfUri: nf.URL,
++		GmmLog: logger.GmmLog, NASLog: logger.GmmLog, ProducerLog: logger.GmmLog,
++	}
++	ran := &context.AmfRan{AnType: access, Log: logger.NgapLog}
++	ranUE, err := ran.NewRanUe(90003)
++	if err != nil { t.Fatal(err) }
++	ranUE.AmfUe = oldUE
++	oldUE.RanUe[access] = ranUE
++	newUE := &context.AmfUe{
++		Supi: oldUE.Supi, ContextValid: true,
++		State: map[models.AccessType]*fsm.State{access: fsm.NewState(context.Registered)},
++		UeCmRegistered: map[models.AccessType]bool{access: true},
++		SdmSubscriptionId: "new-owned-subscription",
++		PolicyAssociationId: "new-owned-policy",
++	}
++	self := context.GetSelf()
++	self.UePool.Store(newUE.Supi, newUE)
++	t.Cleanup(func() { self.UePool.CompareAndDelete(newUE.Supi, newUE) })
++	RemoveAmfUe(oldUE, false)
++	got, ok := self.AmfUeFindBySupi(newUE.Supi)
++	if !ok || got != newUE { t.Fatal("delayed old-context cleanup lost registered owner") }
++	if requests.Load() != 0 { t.Fatal("incomplete old context emitted an NF request") }
++	if !newUE.ContextValid || !newUE.UeCmRegistered[access] ||
++		newUE.SdmSubscriptionId != "new-owned-subscription" ||
++		newUE.PolicyAssociationId != "new-owned-policy" ||
++		!newUE.State[access].Is(context.Registered) {
++		t.Fatal("old-context cleanup mutated replacement state")
++	}
++	if _, ok := self.RanUePool.Load(ranUE.AmfUeNgapId); ok {
++		t.Fatal("old RAN context was not removed normally")
++	}
++}
++
++// Prove ContextValid short-circuits even if stale local NF flags/IDs are set.
++// No mutation of those flags means the downstream consumers were not reached.
++func TestCityverseInvalidContextPurgeShortCircuits(t *testing.T) {
++	access := models.AccessType__3_GPP_ACCESS
++	ue := &context.AmfUe{
++		ContextValid: false, SdmSubscriptionId: "old-subscription",
++		UeCmRegistered: map[models.AccessType]bool{access: true},
++	}
++	if err := PurgeSubscriberData(ue, access); err != nil { t.Fatal(err) }
++	if ue.SdmSubscriptionId != "old-subscription" || !ue.UeCmRegistered[access] {
++		t.Fatal("invalid context reached purge consumers")
++	}
++}

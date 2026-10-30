@@ -1,0 +1,144 @@
+diff --git a/gnb/gnb.go b/gnb/gnb.go
+--- a/gnb/gnb.go
++++ b/gnb/gnb.go
+@@ -603,8 +603,8 @@ func (g *Gnb) handleRanConnection(ctx context.Context, ranUe *RanUe) {
+ 			g.RanLog.Errorf("Error closing UE connection: %v", err)
+ 		}
+ 		g.RanLog.Infof("Closed UE connection from: %v", ranUe.GetN1Conn().RemoteAddr())
+-		ranUe.Release(g.ranUeNgapIdGenerator, g.teidGenerator)
+ 		g.ranUeConns.Delete(ranUe.GetRanUeId())
++		ranUe.Release(g.ranUeNgapIdGenerator, g.teidGenerator)
+ 	}()
+ 
+ 	if err := g.setupN1(ranUe); err != nil {
+diff --git a/gnb/ngapDispatcher.go b/gnb/ngapDispatcher.go
+--- a/gnb/ngapDispatcher.go
++++ b/gnb/ngapDispatcher.go
+@@ -114,8 +114,9 @@ func (d *ngapDispatcher) downLinkNASTransportProcessor(g *Gnb, ngapPdu *ngapType
+ 	}
+ 	ranUe := ueValue.(*RanUe)
+ 
+-	if ranUe.GetAmfUeId() == -1 {
+-		ranUe.SetAmfUeId(amfUeNgapId)
++	if !ranUe.BindAmfUeId(amfUeNgapId) {
++		g.NgapLog.Errorf("Error downlink NAS transport: Ran UE %d has AMF UE ID %d, received %d", ranUeNgapId, ranUe.GetAmfUeId(), amfUeNgapId)
++		return
+ 	}
+ 
+ 	n, err := ranUe.GetN1Conn().Write(downLinkNASTransportMessage)
+diff --git a/gnb/ranUe.go b/gnb/ranUe.go
+--- a/gnb/ranUe.go
++++ b/gnb/ranUe.go
+@@ -13,12 +13,14 @@ import (
+ type RanUeNgapIdGenerator struct {
+ 	usedRanUeIds sync.Map
+ 	mtx          sync.Mutex
++	nextRanUeId  int64
+ }
+ 
+ func NewRanUeNgapIdGenerator() *RanUeNgapIdGenerator {
+ 	return &RanUeNgapIdGenerator{
+ 		usedRanUeIds: sync.Map{},
+ 		mtx:          sync.Mutex{},
++		nextRanUeId:  1,
+ 	}
+ }
+ 
+@@ -26,14 +28,15 @@ func (g *RanUeNgapIdGenerator) AllocateRanUeId() int64 {
+ 	g.mtx.Lock()
+ 	defer g.mtx.Unlock()
+ 
+-	for i := 1; i <= 65535; i++ {
+-		if _, exists := g.usedRanUeIds.Load(int64(i)); !exists {
+-			g.usedRanUeIds.Store(int64(i), true)
+-			return int64(i)
+-		}
++	// A released ID must not be assigned to a different UE while delayed
++	// downlink NAS from the old AMF context may still be in flight.
++	if g.nextRanUeId > (1<<32)-1 {
++		return -1
+ 	}
+-
+-	return -1
++	id := g.nextRanUeId
++	g.nextRanUeId++
++	g.usedRanUeIds.Store(id, true)
++	return id
+ }
+ 
+ func (g *RanUeNgapIdGenerator) ReleaseRanUeId(ranUeId int64) {
+@@ -45,6 +48,7 @@ func (g *RanUeNgapIdGenerator) ReleaseRanUeId(ranUeId int64) {
+ 
+ type RanUe struct {
+ 	amfUeNgapId int64
++	amfUeIdMtx  sync.Mutex
+ 	ranUeNgapId int64
+ 
+ 	mobileIdentity5GS nasType.MobileIdentity5GS
+@@ -95,9 +99,21 @@ func (r *RanUe) Release(ranUeNgapIdGenerator *RanUeNgapIdGenerator, teidGenerato
+ }
+ 
+ func (r *RanUe) GetAmfUeId() int64 {
++	r.amfUeIdMtx.Lock()
++	defer r.amfUeIdMtx.Unlock()
+ 	return r.amfUeNgapId
+ }
+ 
++// BindAmfUeId rejects a stale downlink for a different AMF UE context.
++func (r *RanUe) BindAmfUeId(amfUeId int64) bool {
++	r.amfUeIdMtx.Lock()
++	defer r.amfUeIdMtx.Unlock()
++	if r.amfUeNgapId == -1 {
++		r.amfUeNgapId = amfUeId
++	}
++	return r.amfUeNgapId == amfUeId
++}
++
+ func (r *RanUe) GetRanUeId() int64 {
+ 	return r.ranUeNgapId
+ }
+@@ -124,6 +140,8 @@ func (r *RanUe) GetDataPlaneAddress() *net.UDPAddr {
+ }
+ 
+ func (r *RanUe) SetAmfUeId(amfUeId int64) {
++	r.amfUeIdMtx.Lock()
++	defer r.amfUeIdMtx.Unlock()
+ 	r.amfUeNgapId = amfUeId
+ }
+ 
+diff --git a/gnb/ran_ue_identity_test.go b/gnb/ran_ue_identity_test.go
+new file mode 100644
+--- /dev/null
++++ b/gnb/ran_ue_identity_test.go
+@@ -0,0 +1,31 @@
++package gnb
++
++import "testing"
++
++func TestRanUeIdIsNotImmediatelyReused(t *testing.T) {
++	generator := NewRanUeNgapIdGenerator()
++	first := generator.AllocateRanUeId()
++	if first != 1 {
++		t.Fatalf("first ID = %d, want 1", first)
++	}
++	generator.ReleaseRanUeId(first)
++	if next := generator.AllocateRanUeId(); next != 2 {
++		t.Fatalf("released ID was reused: got %d, want 2", next)
++	}
++}
++
++func TestRanUeRejectsMismatchedAmfContext(t *testing.T) {
++	ranUe := NewRanUe(nil, NewRanUeNgapIdGenerator())
++	if !ranUe.BindAmfUeId(412) {
++		t.Fatal("first AMF context did not bind")
++	}
++	if ranUe.BindAmfUeId(413) {
++		t.Fatal("different AMF context was accepted")
++	}
++	if got := ranUe.GetAmfUeId(); got != 412 {
++		t.Fatalf("AMF context changed to %d, want 412", got)
++	}
++	if !ranUe.BindAmfUeId(412) {
++		t.Fatal("original AMF context was rejected")
++	}
++}

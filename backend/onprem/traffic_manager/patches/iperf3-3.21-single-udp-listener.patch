@@ -1,0 +1,21 @@
+--- a/src/iperf_udp.c
++++ b/src/iperf_udp.c
+@@ -563,7 +563,17 @@
+      * Create a new "listening" socket to replace the one we were using before.
+      */
+     FD_CLR(test->prot_listener, &test->read_set); // No control messages from old listener
+-    test->prot_listener = netannounce(test->settings->domain, Pudp, test->bind_address, test->bind_dev, test->server_port);
++    /* A single, unidirectional stream has accepted its final peer. The server
++     * loop immediately closes prot_listener after accepting that stream.
++     * Duplicate the connected fd for that close instead of binding a new UDP
++     * socket which will never receive data. The stream keeps the original fd,
++     * peer, buffers, cookie and counters. Multiple/bidirectional streams still
++     * need a fresh listener to accept another peer.
++     */
++    if (test->num_streams == 1 && !test->bidirectional)
++        test->prot_listener = dup(s);
++    else
++        test->prot_listener = netannounce(test->settings->domain, Pudp, test->bind_address, test->bind_dev, test->server_port);
+     if (test->prot_listener < 0) {
+         i_errno = IESTREAMLISTEN;
+         return -1;

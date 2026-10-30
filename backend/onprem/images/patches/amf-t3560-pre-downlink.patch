@@ -1,0 +1,37 @@
+diff --git a/internal/gmm/message/send.go b/internal/gmm/message/send.go
+--- a/internal/gmm/message/send.go
++++ b/internal/gmm/message/send.go
+@@ -171,7 +171,6 @@ func SendAuthenticationRequest(ue *context.RanUe) {
+ 	}
+ 
+ 	isNasMsgSent = true
+-	ngap_message.SendDownlinkNasTransport(ue, nasMsg, nil)
+ 
+ 	if context.GetSelf().T3560Cfg.Enable {
+ 		cfg := context.GetSelf().T3560Cfg
+@@ -191,6 +190,10 @@ func SendAuthenticationRequest(ue *context.RanUe) {
+ 			gmm_common.RemoveAmfUe(amfUe, false)
+ 		})
+ 	}
++	// Arm the timer before the NAS message is visible to a fast local UE.
++	// Otherwise Authentication Response can stop a nil timer, after which
++	// this function starts an orphan timer that later removes a healthy UE.
++	ngap_message.SendDownlinkNasTransport(ue, nasMsg, nil)
+ }
+ 
+ func SendServiceAccept(amfUe *context.AmfUe, anType models.AccessType,
+@@ -457,7 +460,6 @@ func SendSecurityModeCommand(ue *context.RanUe, accessType models.AccessType, ea
+ 	}
+ 
+ 	isNasMsgSent = true
+-	ngap_message.SendDownlinkNasTransport(ue, nasMsg, nil)
+ 
+ 	if context.GetSelf().T3560Cfg.Enable {
+ 		cfg := context.GetSelf().T3560Cfg
+@@ -476,4 +478,6 @@ func SendSecurityModeCommand(ue *context.RanUe, accessType models.AccessType, ea
+ 			gmm_common.RemoveAmfUe(amfUe, false)
+ 		})
+ 	}
++	// Security Mode Complete can arrive before a post-send timer is assigned.
++	ngap_message.SendDownlinkNasTransport(ue, nasMsg, nil)
+ }

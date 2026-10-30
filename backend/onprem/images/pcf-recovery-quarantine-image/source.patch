@@ -1,0 +1,1134 @@
+diff --git a/Dockerfile.boot-receipt b/Dockerfile.boot-receipt
+new file mode 100644
+index 0000000..20cf66e
+--- /dev/null
++++ b/Dockerfile.boot-receipt
+@@ -0,0 +1,14 @@
++# Offline-only PCF boot receipt candidate. Based on exact free5GC source and runtime digests.
++FROM golang:1.25.5@sha256:22bd1c41c958c762e9633f07a5fee8266300e5f25e18e269a6d87a4b870368aa AS builder
++WORKDIR /src
++ENV CGO_ENABLED=0 GOTOOLCHAIN=local
++COPY go.mod go.sum ./
++RUN go mod download && go mod verify
++COPY . ./
++RUN go build -trimpath -buildvcs=false -ldflags="-X github.com/free5gc/util/version.VERSION=v4.2.2-cityverse-boot-receipt -X github.com/free5gc/util/version.COMMIT_HASH=df6c0daa+boot-receipt" -o /out/pcf ./cmd
++
++FROM free5gc/pcf:v4.2.2@sha256:b6208c82a02917cb6d620336d1245c00d875254e2c9bd28416c2e250a43453a4 AS runtime
++LABEL org.opencontainers.image.source="https://github.com/free5gc/pcf" \
++      org.opencontainers.image.revision="df6c0daacbc7fe5f610f19665e169f013eb05721" \
++      io.cityverse.pcf.scope="offline-boot-empty-receipt-candidate"
++COPY --from=builder /out/pcf /free5gc/pcf
+diff --git a/Dockerfile.boot-receipt.dockerignore b/Dockerfile.boot-receipt.dockerignore
+new file mode 100644
+index 0000000..8447ae9
+--- /dev/null
++++ b/Dockerfile.boot-receipt.dockerignore
+@@ -0,0 +1,6 @@
++.git
++.gitignore
++*.log
++*.tar
++*.oci
++Dockerfile.boot-receipt.dockerignore
+diff --git a/Dockerfile.recovery-quarantine b/Dockerfile.recovery-quarantine
+new file mode 100644
+index 0000000..27e3bdf
+--- /dev/null
++++ b/Dockerfile.recovery-quarantine
+@@ -0,0 +1,14 @@
++# Offline-only PCF recovery quarantine candidate, pinned upstream and runtime.
++FROM golang:1.25.5@sha256:22bd1c41c958c762e9633f07a5fee8266300e5f25e18e269a6d87a4b870368aa AS builder
++WORKDIR /src
++ENV CGO_ENABLED=0 GOTOOLCHAIN=local
++COPY go.mod go.sum ./
++RUN go mod download && go mod verify
++COPY . ./
++RUN go build -trimpath -buildvcs=false -ldflags="-X github.com/free5gc/util/version.VERSION=v4.2.2-cityverse-recovery-quarantine -X github.com/free5gc/util/version.COMMIT_HASH=df6c0daa+recovery-quarantine" -o /out/pcf ./cmd
++
++FROM free5gc/pcf:v4.2.2@sha256:b6208c82a02917cb6d620336d1245c00d875254e2c9bd28416c2e250a43453a4 AS runtime
++LABEL org.opencontainers.image.source="https://github.com/free5gc/pcf" \
++      org.opencontainers.image.revision="df6c0daacbc7fe5f610f19665e169f013eb05721" \
++      io.cityverse.pcf.scope="offline-recovery-quarantine-candidate"
++COPY --from=builder /out/pcf /free5gc/pcf
+diff --git a/Dockerfile.recovery-quarantine.dockerignore b/Dockerfile.recovery-quarantine.dockerignore
+new file mode 100644
+index 0000000..0d6264c
+--- /dev/null
++++ b/Dockerfile.recovery-quarantine.dockerignore
+@@ -0,0 +1,4 @@
++.git
++.cache
++.tmp
++*.oci.tar
+diff --git a/internal/context/boot_receipt.go b/internal/context/boot_receipt.go
+new file mode 100644
+index 0000000..4748bdb
+--- /dev/null
++++ b/internal/context/boot_receipt.go
+@@ -0,0 +1,100 @@
++package context
++
++import (
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"io"
++	"os"
++	"regexp"
++	"sync"
++	"time"
++)
++
++// BootReceipt describes only the state of this process before it starts its SBI
++// listener. It deliberately makes no claim about an earlier PCF incarnation or
++// policies that may remain in SMF or UPF.
++type BootReceipt struct {
++	SchemaVersion         int    `json:"schemaVersion"`
++	Source                string `json:"source"`
++	BootEpoch             string `json:"bootEpoch"`
++	ObservedAt            string `json:"observedAt"`
++	PodUID                string `json:"podUid"`
++	PID                   int    `json:"pid"`
++	BinarySHA256          string `json:"binarySha256"`
++	NfInstanceID          string `json:"nfInstanceId"`
++	PreListenerPoolsEmpty bool   `json:"preListenerPoolsEmpty"`
++	UECount               int    `json:"ueCount"`
++	AppSessionCount       int    `json:"appSessionCount"`
++	BdtPolicyCount        int    `json:"bdtPolicyCount"`
++	AMFStatusSubsCount    int    `json:"amfStatusSubsCount"`
++	PriorEpochState       string `json:"priorEpochState"`
++}
++
++var podUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
++var bootReceiptLock sync.Mutex
++var bootReceipt *BootReceipt
++
++func newBootReceipt(c *PCFContext, podUID, binaryPath string) (BootReceipt, error) {
++	if c == nil || !podUIDPattern.MatchString(podUID) || c.NfId == "" {
++		return BootReceipt{}, errors.New("PCF boot identity unavailable")
++	}
++	// This function is called once by NewApp before NewServer and before any
++	// listener or NF registration. sync.Map.Range is safe here because there is
++	// no policy writer yet; it must never be reused for live inventory.
++	counts := [4]int{}
++	c.UePool.Range(func(_, _ any) bool { counts[0]++; return true })
++	c.AppSessionPool.Range(func(_, _ any) bool { counts[1]++; return true })
++	c.BdtPolicyPool.Range(func(_, _ any) bool { counts[2]++; return true })
++	c.AMFStatusSubsData.Range(func(_, _ any) bool { counts[3]++; return true })
++	if counts != [4]int{} {
++		return BootReceipt{}, errors.New("PCF active pool populated before listener")
++	}
++	file, err := os.Open(binaryPath)
++	if err != nil {
++		return BootReceipt{}, err
++	}
++	defer file.Close()
++	hash := sha256.New()
++	if _, err = io.Copy(hash, file); err != nil {
++		return BootReceipt{}, err
++	}
++	nonce := make([]byte, 16)
++	if _, err = rand.Read(nonce); err != nil {
++		return BootReceipt{}, err
++	}
++	return BootReceipt{
++		SchemaVersion: 1, Source: "pcf-process-pre-listener",
++		BootEpoch: hex.EncodeToString(nonce), ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
++		PodUID: podUID, PID: os.Getpid(), BinarySHA256: "sha256:" + hex.EncodeToString(hash.Sum(nil)),
++		NfInstanceID: c.NfId, PreListenerPoolsEmpty: true,
++		UECount: 0, AppSessionCount: 0, BdtPolicyCount: 0, AMFStatusSubsCount: 0,
++		PriorEpochState: "unknown",
++	}, nil
++}
++
++// CaptureBootReceipt is the only initialization path. Repeated calls fail
++// closed rather than replacing an epoch while this process may be serving.
++func CaptureBootReceipt(podUID string) (BootReceipt, error) {
++	bootReceiptLock.Lock()
++	defer bootReceiptLock.Unlock()
++	if bootReceipt != nil {
++		return BootReceipt{}, errors.New("PCF boot receipt already captured")
++	}
++	receipt, err := newBootReceipt(&pcfContext, podUID, "/proc/self/exe")
++	if err != nil {
++		return BootReceipt{}, err
++	}
++	bootReceipt = &receipt
++	return receipt, nil
++}
++
++func GetBootReceipt() (BootReceipt, bool) {
++	bootReceiptLock.Lock()
++	defer bootReceiptLock.Unlock()
++	if bootReceipt == nil {
++		return BootReceipt{}, false
++	}
++	return *bootReceipt, true
++}
+diff --git a/internal/context/boot_receipt_test.go b/internal/context/boot_receipt_test.go
+new file mode 100644
+index 0000000..0bbe00f
+--- /dev/null
++++ b/internal/context/boot_receipt_test.go
+@@ -0,0 +1,73 @@
++package context
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++const testPodUID = "12345678-1234-1234-1234-123456789abc"
++
++func testBinary(t *testing.T) string {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "pcf")
++	if err := os.WriteFile(path, []byte("isolated-test-binary"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++func TestBootReceiptEmptyBeforeListener(t *testing.T) {
++	c := &PCFContext{NfId: "pcf-test-instance"}
++	r, err := newBootReceipt(c, testPodUID, testBinary(t))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if r.SchemaVersion != 1 || r.Source != "pcf-process-pre-listener" ||
++		r.PodUID != testPodUID || r.NfInstanceID != c.NfId ||
++		!r.PreListenerPoolsEmpty || r.PriorEpochState != "unknown" ||
++		r.UECount != 0 || r.AppSessionCount != 0 || r.BdtPolicyCount != 0 || r.AMFStatusSubsCount != 0 ||
++		len(r.BootEpoch) != 32 || !strings.HasPrefix(r.BinarySHA256, "sha256:") ||
++		len(r.BinarySHA256) != 71 || r.PID <= 0 || r.ObservedAt == "" {
++		t.Fatalf("invalid boot receipt: %+v", r)
++	}
++	other, err := newBootReceipt(c, testPodUID, testBinary(t))
++	if err != nil || other.BootEpoch == r.BootEpoch {
++		t.Fatal("boot epoch must be unique")
++	}
++}
++
++func TestBootReceiptFailsClosedForPreExistingPolicy(t *testing.T) {
++	for _, pool := range []string{"ue", "app", "bdt", "amfStatus"} {
++		t.Run(pool, func(t *testing.T) {
++			c := &PCFContext{NfId: "pcf-test-instance"}
++			switch pool {
++			case "ue":
++				c.UePool.Store("imsi-test", struct{}{})
++			case "app":
++				c.AppSessionPool.Store("app-test", struct{}{})
++			case "bdt":
++				c.BdtPolicyPool.Store("bdt-test", struct{}{})
++			case "amfStatus":
++				c.AMFStatusSubsData.Store("subscription-test", struct{}{})
++			}
++			if _, err := newBootReceipt(c, testPodUID, testBinary(t)); err == nil {
++				t.Fatal("populated pool accepted")
++			}
++		})
++	}
++}
++
++func TestBootReceiptRequiresBoundIdentity(t *testing.T) {
++	c := &PCFContext{NfId: "pcf-test-instance"}
++	for _, uid := range []string{"", "not-a-pod-uid", "12345678-1234-1234-1234-123456789abz"} {
++		if _, err := newBootReceipt(c, uid, testBinary(t)); err == nil {
++			t.Fatal("unbound identity accepted")
++		}
++	}
++	c.NfId = ""
++	if _, err := newBootReceipt(c, testPodUID, testBinary(t)); err == nil {
++		t.Fatal("missing NF identity accepted")
++	}
++}
+diff --git a/internal/context/context.go b/internal/context/context.go
+index d2ba9a2..698ec1e 100644
+--- a/internal/context/context.go
++++ b/internal/context/context.go
+@@ -35,14 +35,15 @@ type PCFContext struct {
+ 	DefaultUdrURI   string
+ 	Locality        string
+ 	// UePool          map[string]*UeContext
+-	UePool sync.Map
++	UePool GuardedPool
+ 	// Bdt Policy related
+-	BdtPolicyPool        sync.Map
++	BdtPolicyPool        GuardedPool
+ 	BdtPolicyIDGenerator *idgenerator.IDGenerator
+ 	// App Session related
+-	AppSessionPool sync.Map
++	AppSessionPool GuardedPool
+ 	// AMF Status Change Subscription related
+-	AMFStatusSubsData sync.Map // map[string]AMFStatusSubscriptionData; subscriptionID as key
++	AMFStatusSubsData GuardedPool // map[string]AMFStatusSubscriptionData; subscriptionID as key
++	recoveryGate *recoveryMutationGate
+ 
+ 	// lock
+ 	DefaultUdrURILock sync.RWMutex
+diff --git a/internal/context/recovery_quarantine.go b/internal/context/recovery_quarantine.go
+new file mode 100644
+index 0000000..699bc8a
+--- /dev/null
++++ b/internal/context/recovery_quarantine.go
+@@ -0,0 +1,189 @@
++package context
++
++import (
++	"crypto/rand"
++	"encoding/hex"
++	"errors"
++	"sync"
++	"time"
++)
++
++const (
++	uePoolIndex = iota
++	appSessionPoolIndex
++	bdtPolicyPoolIndex
++	amfStatusPoolIndex
++	poolCount
++)
++
++// GuardedPool deliberately does not embed sync.Map. A new mutation method
++// must be added here and reviewed against the same gate before it can compile.
++type GuardedPool struct {
++	data  sync.Map
++	gate  *recoveryMutationGate
++	index int
++}
++
++func (p *GuardedPool) Load(key any) (any, bool)    { return p.data.Load(key) }
++func (p *GuardedPool) Range(f func(any, any) bool) { p.data.Range(f) }
++
++func (p *GuardedPool) Store(key, value any) {
++	if p.gate == nil {
++		p.data.Store(key, value)
++		return
++	}
++	p.gate.mu.Lock()
++	defer p.gate.mu.Unlock()
++	p.gate.attemptedStores[p.index]++
++	if p.gate.active {
++		p.gate.deniedStores[p.index]++
++		return
++	}
++	p.data.Store(key, value)
++}
++
++func (p *GuardedPool) Delete(key any) {
++	if p.gate == nil {
++		p.data.Delete(key)
++		return
++	}
++	p.gate.mu.Lock()
++	defer p.gate.mu.Unlock()
++	p.gate.attemptedDeletes[p.index]++
++	if p.gate.active {
++		p.gate.deniedDeletes[p.index]++
++		return
++	}
++	p.data.Delete(key)
++}
++
++type recoveryMutationGate struct {
++	mu               sync.Mutex
++	active           bool
++	epoch            string
++	boot             BootReceipt
++	attemptedStores  [poolCount]uint64
++	attemptedDeletes [poolCount]uint64
++	deniedStores     [poolCount]uint64
++	deniedDeletes    [poolCount]uint64
++}
++
++type RecoveryPoolCounts struct {
++	UE            int `json:"ue"`
++	AppSession    int `json:"appSession"`
++	BdtPolicy     int `json:"bdtPolicy"`
++	AmfStatusSubs int `json:"amfStatusSubs"`
++}
++
++type RecoveryMutationCounter struct {
++	AttemptedStores  uint64 `json:"attemptedStores"`
++	AttemptedDeletes uint64 `json:"attemptedDeletes"`
++	DeniedStores     uint64 `json:"deniedStores"`
++	DeniedDeletes    uint64 `json:"deniedDeletes"`
++}
++
++type RecoveryMutationCounts struct {
++	UE            RecoveryMutationCounter `json:"ue"`
++	AppSession    RecoveryMutationCounter `json:"appSession"`
++	BdtPolicy     RecoveryMutationCounter `json:"bdtPolicy"`
++	AmfStatusSubs RecoveryMutationCounter `json:"amfStatusSubs"`
++}
++
++type RecoveryCurrentReceipt struct {
++	SchemaVersion              string                 `json:"schemaVersion"`
++	Source                     string                 `json:"source"`
++	PodUID                     string                 `json:"podUid"`
++	BootEpoch                  string                 `json:"bootEpoch"`
++	GateEpoch                  string                 `json:"gateEpoch"`
++	BinarySHA256               string                 `json:"binarySha256"`
++	ObservedAt                 string                 `json:"observedAt"`
++	QuarantineActive           bool                   `json:"quarantineActive"`
++	InventoryComplete          bool                   `json:"inventoryComplete"`
++	InventoryScope             string                 `json:"inventoryScope"`
++	CurrentZero                bool                   `json:"currentZero"`
++	Pools                      RecoveryPoolCounts     `json:"pools"`
++	Mutations                  RecoveryMutationCounts `json:"mutations"`
++	PriorEpochState            string                 `json:"priorEpochState"`
++	ExternalPolicyState        string                 `json:"externalPolicyState"`
++	PriorEpochExternalNRFState string                 `json:"priorEpochExternalNrfState"`
++	NRFRegistrationState       string                 `json:"nrfRegistrationState"`
++}
++
++func (c *PCFContext) recoveryPools() [poolCount]*GuardedPool {
++	return [poolCount]*GuardedPool{&c.UePool, &c.AppSessionPool,
++		&c.BdtPolicyPool, &c.AMFStatusSubsData}
++}
++
++func currentCounts(pools [poolCount]*GuardedPool) [poolCount]int {
++	var counts [poolCount]int
++	for i, pool := range pools {
++		pool.data.Range(func(_, _ any) bool { counts[i]++; return true })
++	}
++	return counts
++}
++
++func (g *recoveryMutationGate) mutationCounter(index int) RecoveryMutationCounter {
++	return RecoveryMutationCounter{g.attemptedStores[index], g.attemptedDeletes[index],
++		g.deniedStores[index], g.deniedDeletes[index]}
++}
++
++// EnableRecoveryQuarantine is called only by NewApp, after the pre-listener
++// boot receipt and before NewServer, NRF registration, or policy handlers.
++// There is no writer during this initialization phase.
++func (c *PCFContext) EnableRecoveryQuarantine(boot BootReceipt) error {
++	if c == nil || c.recoveryGate != nil || !boot.PreListenerPoolsEmpty ||
++		!podUIDPattern.MatchString(boot.PodUID) || boot.BootEpoch == "" ||
++		boot.PriorEpochState != "unknown" {
++		return errors.New("PCF recovery quarantine boot identity unavailable or replayed")
++	}
++	pools := c.recoveryPools()
++	if currentCounts(pools) != [poolCount]int{} {
++		return errors.New("PCF recovery quarantine requires four empty pools")
++	}
++	nonce := make([]byte, 16)
++	if _, err := rand.Read(nonce); err != nil {
++		return err
++	}
++	gate := &recoveryMutationGate{active: true, epoch: hex.EncodeToString(nonce), boot: boot}
++	for i, pool := range pools {
++		pool.index, pool.gate = i, gate
++	}
++	c.recoveryGate = gate
++	return nil
++}
++
++func (c *PCFContext) RecoveryQuarantineEnabled() bool {
++	return c != nil && c.recoveryGate != nil && c.recoveryGate.active
++}
++
++// CurrentRecoveryReceipt uses the same mutation gate as all four pool writes.
++// It proves only this process's current in-memory pool membership.
++func (c *PCFContext) CurrentRecoveryReceipt() (RecoveryCurrentReceipt, bool) {
++	if !c.RecoveryQuarantineEnabled() {
++		return RecoveryCurrentReceipt{}, false
++	}
++	gate := c.recoveryGate
++	gate.mu.Lock()
++	defer gate.mu.Unlock()
++	counts := currentCounts(c.recoveryPools())
++	return RecoveryCurrentReceipt{
++		SchemaVersion: "cityverse.pcf-recovery-current/v1",
++		Source:        "pcf-process-quarantine-current", PodUID: gate.boot.PodUID,
++		BootEpoch: gate.boot.BootEpoch, GateEpoch: gate.epoch,
++		BinarySHA256:     gate.boot.BinarySHA256,
++		ObservedAt:       time.Now().UTC().Format(time.RFC3339Nano),
++		QuarantineActive: true, InventoryComplete: true,
++		InventoryScope: "current-pcf-process-four-pools-only",
++		CurrentZero:    counts == [poolCount]int{},
++		Pools: RecoveryPoolCounts{UE: counts[uePoolIndex],
++			AppSession: counts[appSessionPoolIndex], BdtPolicy: counts[bdtPolicyPoolIndex],
++			AmfStatusSubs: counts[amfStatusPoolIndex]},
++		Mutations: RecoveryMutationCounts{UE: gate.mutationCounter(uePoolIndex),
++			AppSession:    gate.mutationCounter(appSessionPoolIndex),
++			BdtPolicy:     gate.mutationCounter(bdtPolicyPoolIndex),
++			AmfStatusSubs: gate.mutationCounter(amfStatusPoolIndex)},
++		PriorEpochState: "unknown", ExternalPolicyState: "unknown",
++		PriorEpochExternalNRFState: "unknown",
++		NRFRegistrationState:       "disabled-by-quarantine",
++	}, true
++}
+diff --git a/internal/context/recovery_quarantine_test.go b/internal/context/recovery_quarantine_test.go
+new file mode 100644
+index 0000000..9e4c2b0
+--- /dev/null
++++ b/internal/context/recovery_quarantine_test.go
+@@ -0,0 +1,105 @@
++package context
++
++import (
++	"sync"
++	"testing"
++)
++
++func quarantineTestContext(t *testing.T) *PCFContext {
++	t.Helper()
++	c := &PCFContext{NfId: "pcf-quarantine-test"}
++	boot, err := newBootReceipt(c, testPodUID, testBinary(t))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := c.EnableRecoveryQuarantine(boot); err != nil {
++		t.Fatal(err)
++	}
++	return c
++}
++
++func TestRecoveryQuarantineAllFourPools(t *testing.T) {
++	c := quarantineTestContext(t)
++	for _, pool := range c.recoveryPools() {
++		pool.Store("new", "policy")
++		pool.Delete("new")
++		if _, ok := pool.Load("new"); ok {
++			t.Fatal("quarantined mutation entered pool")
++		}
++	}
++	r, ok := c.CurrentRecoveryReceipt()
++	if !ok || !r.InventoryComplete || !r.CurrentZero || !r.QuarantineActive ||
++		r.Pools != (RecoveryPoolCounts{}) || r.PodUID != testPodUID ||
++		r.BootEpoch == "" || r.GateEpoch == "" || r.ObservedAt == "" ||
++		r.PriorEpochState != "unknown" || r.ExternalPolicyState != "unknown" ||
++		r.PriorEpochExternalNRFState != "unknown" ||
++		r.InventoryScope != "current-pcf-process-four-pools-only" {
++		t.Fatalf("invalid current receipt: %+v", r)
++	}
++	for _, count := range []RecoveryMutationCounter{r.Mutations.UE, r.Mutations.AppSession,
++		r.Mutations.BdtPolicy, r.Mutations.AmfStatusSubs} {
++		if count != (RecoveryMutationCounter{1, 1, 1, 1}) {
++			t.Fatalf("mutation counts: %+v", count)
++		}
++	}
++	if err := c.EnableRecoveryQuarantine(BootReceipt{}); err == nil {
++		t.Fatal("replay accepted")
++	}
++}
++
++func TestRecoveryQuarantineRequiresEmptyFourthPool(t *testing.T) {
++	c := &PCFContext{NfId: "pcf-quarantine-test"}
++	c.AMFStatusSubsData.Store("old", "subscription")
++	boot := BootReceipt{PodUID: testPodUID, BootEpoch: "epoch", PreListenerPoolsEmpty: true,
++		PriorEpochState: "unknown"}
++	if err := c.EnableRecoveryQuarantine(boot); err == nil {
++		t.Fatal("populated fourth pool accepted")
++	}
++	if _, ok := c.CurrentRecoveryReceipt(); ok {
++		t.Fatal("current receipt without gate")
++	}
++}
++
++func TestRecoveryQuarantineConcurrentMutationAndSnapshot(t *testing.T) {
++	c := quarantineTestContext(t)
++	var workers sync.WaitGroup
++	for _, pool := range c.recoveryPools() {
++		workers.Add(1)
++		go func(p *GuardedPool) {
++			defer workers.Done()
++			for i := 0; i < 100; i++ {
++				p.Store(i, i)
++				p.Delete(i)
++			}
++		}(pool)
++	}
++	for i := 0; i < 100; i++ {
++		r, ok := c.CurrentRecoveryReceipt()
++		if !ok || !r.CurrentZero || r.Pools != (RecoveryPoolCounts{}) {
++			t.Fatal("nonzero concurrent inventory")
++		}
++	}
++	workers.Wait()
++	r, _ := c.CurrentRecoveryReceipt()
++	for _, count := range []RecoveryMutationCounter{r.Mutations.UE, r.Mutations.AppSession,
++		r.Mutations.BdtPolicy, r.Mutations.AmfStatusSubs} {
++		if count != (RecoveryMutationCounter{100, 100, 100, 100}) {
++			t.Fatalf("lost mutation count: %+v", count)
++		}
++	}
++}
++
++func TestRecoveryDefaultPoolBehavior(t *testing.T) {
++	c := &PCFContext{}
++	c.AMFStatusSubsData.Store("key", "value")
++	if value, ok := c.AMFStatusSubsData.Load("key"); !ok || value != "value" {
++		t.Fatal("default store changed")
++	}
++	c.AMFStatusSubsData.Delete("key")
++	if _, ok := c.AMFStatusSubsData.Load("key"); ok {
++		t.Fatal("default delete changed")
++	}
++	if _, ok := c.CurrentRecoveryReceipt(); ok {
++		t.Fatal("default exposed current receipt")
++	}
++}
+diff --git a/internal/sbi/api_oam.go b/internal/sbi/api_oam.go
+index 17119ee..0093185 100644
+--- a/internal/sbi/api_oam.go
++++ b/internal/sbi/api_oam.go
+@@ -1,35 +1,20 @@
+ package sbi
+ 
+ import (
++	"net"
+ 	"net/http"
+ 
+-	"github.com/gin-contrib/cors"
+ 	"github.com/gin-gonic/gin"
+ 
+ 	"github.com/free5gc/openapi/models"
++	pcf_context "github.com/free5gc/pcf/internal/context"
+ 	"github.com/free5gc/pcf/internal/util"
+ 	"github.com/free5gc/util/metrics/sbi"
+ )
+ 
+-const (
+-	CorsConfigMaxAge = 86400
+-)
+-
+ func (s *Server) setCorsHeader(c *gin.Context) {
+ 	// TODO: 1. turn these values into configurable variables
+ 	// TODO: 2. use the official cors middleware
+-	s.router.Use(cors.New(cors.Config{
+-		AllowMethods: []string{"GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"},
+-		AllowHeaders: []string{
+-			"Origin", "Content-Length", "Content-Type", "User-Agent",
+-			"Referrer", "Host", "Token", "X-Requested-With",
+-		},
+-		ExposeHeaders:    []string{"Content-Length"},
+-		AllowCredentials: true,
+-		AllowAllOrigins:  true,
+-		MaxAge:           CorsConfigMaxAge,
+-	}))
+-
+ 	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+ 	c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+ 	c.Writer.Header().Set(
+@@ -54,8 +39,50 @@ func (s *Server) HTTPOAMGetAmPolicy(c *gin.Context) {
+ 	s.Processor().HandleOAMGetAmPolicyRequest(c, supi)
+ }
+ 
++// The immutable receipt was captured before the listener started. Reading it
++// does not inspect the live policy maps or claim a current/global inventory.
++func (s *Server) HTTPOAMGetBootReceipt(c *gin.Context) {
++	peer, _, err := net.SplitHostPort(c.Request.RemoteAddr)
++	ip := net.ParseIP(peer)
++	if err != nil || ip == nil || !ip.IsLoopback() {
++		c.Status(http.StatusForbidden)
++		return
++	}
++	receipt, ok := pcf_context.GetBootReceipt()
++	if !ok {
++		c.Status(http.StatusServiceUnavailable)
++		return
++	}
++	c.JSON(http.StatusOK, receipt)
++}
++
++func (s *Server) HTTPOAMGetRecoveryCurrent(c *gin.Context) {
++	peer, _, err := net.SplitHostPort(c.Request.RemoteAddr)
++	ip := net.ParseIP(peer)
++	if err != nil || ip == nil || !ip.IsLoopback() {
++		c.Status(http.StatusForbidden)
++		return
++	}
++	receipt, ok := s.Context().CurrentRecoveryReceipt()
++	if !ok {
++		c.Status(http.StatusServiceUnavailable)
++		return
++	}
++	c.JSON(http.StatusOK, receipt)
++}
++
+ func (s *Server) getOamRoutes() []Route {
+ 	return []Route{
++		{
++			Method:  http.MethodGet,
++			Pattern: "/boot-receipt",
++			APIFunc: s.HTTPOAMGetBootReceipt,
++		},
++		{
++			Method:  http.MethodGet,
++			Pattern: "/recovery-current",
++			APIFunc: s.HTTPOAMGetRecoveryCurrent,
++		},
+ 		{
+ 			Method:  http.MethodGet,
+ 			Pattern: "/am-policy/:supi",
+diff --git a/internal/sbi/pcf_oam_cors_regression_test.go b/internal/sbi/pcf_oam_cors_regression_test.go
+new file mode 100644
+index 0000000..19cb79c
+--- /dev/null
++++ b/internal/sbi/pcf_oam_cors_regression_test.go
+@@ -0,0 +1,174 @@
++package sbi
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++
++	pcfcontext "github.com/free5gc/pcf/internal/context"
++	"github.com/free5gc/pcf/internal/sbi/processor"
++	"github.com/gin-gonic/gin"
++)
++
++// Embed unused app methods, but execute the real OAM handler and processor.
++// The exercised processor uses only the in-memory UePool; no NF is started.
++type corsRegressionPCF struct{ pcf }
++
++func (corsRegressionPCF) Processor() *processor.Processor { return &processor.Processor{} }
++
++func corsRegressionRouter(recovery io.Writer) *gin.Engine {
++	router := gin.New()
++	router.Use(gin.RecoveryWithWriter(recovery))
++	server := &Server{pcf: corsRegressionPCF{}, router: router}
++	applyRoutes(router.Group("/oam"), server.getOamRoutes())
++	router.GET("/missing-supi", server.HTTPOAMGetAmPolicy)
++	return router
++}
++
++func corsRegressionRequest(router *gin.Engine, path string) *httptest.ResponseRecorder {
++	recorder := httptest.NewRecorder()
++	request := httptest.NewRequest(http.MethodGet, path, nil)
++	request.Header.Set("Origin", "https://example.invalid")
++	router.ServeHTTP(recorder, request)
++	return recorder
++}
++
++func corsRegressionHeaders(recorder *httptest.ResponseRecorder) error {
++	want := map[string]string{
++		"Access-Control-Allow-Origin":      "*",
++		"Access-Control-Allow-Credentials": "true",
++		"Access-Control-Allow-Headers":     "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With",
++		"Access-Control-Allow-Methods":     "POST, OPTIONS, GET, PUT, PATCH, DELETE",
++	}
++	for key, value := range want {
++		if got := recorder.Header().Get(key); got != value {
++			return fmt.Errorf("header %s = %q; want %q", key, got, value)
++		}
++	}
++	return nil
++}
++
++func TestOAMCorsSequential(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	var recovery bytes.Buffer
++	router := corsRegressionRouter(&recovery)
++	before := len(router.Handlers)
++	firstBad, failures := -1, 0
++	for i := 0; i < 256; i++ {
++		r := corsRegressionRequest(router, "/oam/am-policy/imsi-cors-regression-absent")
++		if r.Code != http.StatusNotFound || !strings.Contains(r.Body.String(), "CONTEXT_NOT_FOUND") || corsRegressionHeaders(r) != nil {
++			failures++
++			if firstBad < 0 {
++				firstBad = i + 1
++			}
++		}
++	}
++	t.Logf("requests=256 firstBad=%d failures=%d handlersBefore=%d handlersAfter=%d tooManyHandlers=%t",
++		firstBad, failures, before, len(router.Handlers), strings.Contains(recovery.String(), "too many handlers"))
++	if failures != 0 || len(router.Handlers) != before {
++		t.Fatalf("OAM request mutated router or failed: failures=%d handlers=%d->%d", failures, before, len(router.Handlers))
++	}
++}
++
++func TestOAMCorsConcurrent(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	router := corsRegressionRouter(io.Discard)
++	before := len(router.Handlers)
++	errors := make(chan error, 256)
++	var workers sync.WaitGroup
++	for worker := 0; worker < 16; worker++ {
++		workers.Add(1)
++		go func() {
++			defer workers.Done()
++			for request := 0; request < 16; request++ {
++				r := corsRegressionRequest(router, "/oam/am-policy/imsi-cors-regression-absent")
++				if r.Code != http.StatusNotFound || !strings.Contains(r.Body.String(), "CONTEXT_NOT_FOUND") {
++					errors <- fmt.Errorf("unexpected OAM status/body: %d %s", r.Code, r.Body.String())
++				} else if err := corsRegressionHeaders(r); err != nil {
++					errors <- err
++				}
++			}
++		}()
++	}
++	workers.Wait()
++	close(errors)
++	for err := range errors {
++		t.Error(err)
++	}
++	if len(router.Handlers) != before {
++		t.Errorf("handler count changed %d->%d", before, len(router.Handlers))
++	}
++	t.Logf("concurrent requests=256 workers=16 handlers=%d->%d", before, len(router.Handlers))
++}
++
++func TestOAMCorsStatusAndHeaders(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	router := corsRegressionRouter(io.Discard)
++	supi := "imsi-cors-regression-present"
++	pcfcontext.GetSelf().UePool.Store(supi, &pcfcontext.UeContext{})
++	defer pcfcontext.GetSelf().UePool.Delete(supi)
++	for _, tc := range []struct {
++		path   string
++		status int
++		body   string
++	}{
++		{"/missing-supi", http.StatusBadRequest, "400"},
++		{"/oam/am-policy/" + supi, http.StatusOK, "[]"},
++		{"/oam/am-policy/imsi-cors-regression-absent", http.StatusNotFound, "CONTEXT_NOT_FOUND"},
++	} {
++		r := corsRegressionRequest(router, tc.path)
++		if r.Code != tc.status || !strings.Contains(r.Body.String(), tc.body) {
++			t.Errorf("%s: %d %s", tc.path, r.Code, r.Body.String())
++		}
++		if err := corsRegressionHeaders(r); err != nil {
++			t.Error(err)
++		}
++	}
++	r := corsRegressionRequest(router, "/not-a-route")
++	if r.Code != http.StatusNotFound || r.Body.String() != "404 page not found" {
++		t.Errorf("router 404 changed: %d %s", r.Code, r.Body.String())
++	}
++}
++
++func TestBootReceiptRouteIsImmutableAndPreListener(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	router := corsRegressionRouter(io.Discard)
++	readBoot := func(remote string) *httptest.ResponseRecorder {
++		recorder := httptest.NewRecorder()
++		request := httptest.NewRequest(http.MethodGet, "/oam/boot-receipt", nil)
++		request.RemoteAddr = remote
++		router.ServeHTTP(recorder, request)
++		return recorder
++	}
++	if external := readBoot("192.0.2.10:1234"); external.Code != http.StatusForbidden {
++		t.Fatalf("external boot receipt read accepted: %d", external.Code)
++	}
++	before := readBoot("127.0.0.1:1234")
++	if before.Code != http.StatusServiceUnavailable {
++		t.Fatalf("boot receipt available before capture: %d", before.Code)
++	}
++	pcfcontext.GetSelf().NfId = "pcf-boot-route-test"
++	receipt, err := pcfcontext.CaptureBootReceipt("12345678-1234-1234-1234-123456789abc")
++	if err != nil {
++		t.Fatal(err)
++	}
++	for i := 0; i < 2; i++ {
++		response := readBoot("127.0.0.1:1234")
++		if response.Code != http.StatusOK {
++			t.Fatalf("boot receipt status: %d", response.Code)
++		}
++		var observed pcfcontext.BootReceipt
++		if err := json.Unmarshal(response.Body.Bytes(), &observed); err != nil {
++			t.Fatal(err)
++		}
++		if observed != receipt || !observed.PreListenerPoolsEmpty || observed.PriorEpochState != "unknown" {
++			t.Fatalf("boot receipt changed or overclaimed: %+v", observed)
++		}
++	}
++}
+diff --git a/internal/sbi/recovery_quarantine_test.go b/internal/sbi/recovery_quarantine_test.go
+new file mode 100644
+index 0000000..24f43a1
+--- /dev/null
++++ b/internal/sbi/recovery_quarantine_test.go
+@@ -0,0 +1,124 @@
++package sbi
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	pcf_context "github.com/free5gc/pcf/internal/context"
++	"github.com/free5gc/pcf/pkg/factory"
++	"github.com/gin-gonic/gin"
++)
++
++type quarantineRoutePCF struct {
++	corsRegressionPCF
++	ctx *pcf_context.PCFContext
++}
++
++func (p quarantineRoutePCF) Context() *pcf_context.PCFContext { return p.ctx }
++
++func TestRecoveryQuarantineSkipsNRFRegistration(t *testing.T) {
++	ctx := &pcf_context.PCFContext{NfId: "before"}
++	boot := pcf_context.BootReceipt{PodUID: "12345678-1234-1234-1234-123456789abc",
++		BootEpoch: "test-epoch", PreListenerPoolsEmpty: true, PriorEpochState: "unknown"}
++	server := &Server{pcf: quarantineRoutePCF{ctx: ctx}}
++	calls := 0
++	register := func() (string, error) { calls++; return "registered", nil }
++	if err := ctx.EnableRecoveryQuarantine(boot); err != nil {
++		t.Fatal(err)
++	}
++	if err := server.registerWithNRF(register); err != nil {
++		t.Fatal(err)
++	}
++	if calls != 0 || ctx.NfId != "before" {
++		t.Fatal("recovery PCF registered with NRF")
++	}
++	other := &pcf_context.PCFContext{NfId: "before"}
++	server.pcf = quarantineRoutePCF{ctx: other}
++	if err := server.registerWithNRF(register); err != nil {
++		t.Fatal(err)
++	}
++	if calls != 1 || other.NfId != "registered" {
++		t.Fatal("default registration changed")
++	}
++}
++
++func TestRecoveryCurrentOAMLoopbackAndScope(t *testing.T) {
++	ctx := &pcf_context.PCFContext{}
++	boot := pcf_context.BootReceipt{PodUID: "12345678-1234-1234-1234-123456789abc",
++		BootEpoch: "test-epoch", PreListenerPoolsEmpty: true, PriorEpochState: "unknown"}
++	if err := ctx.EnableRecoveryQuarantine(boot); err != nil {
++		t.Fatal(err)
++	}
++	server := &Server{pcf: quarantineRoutePCF{ctx: ctx}}
++	for _, tc := range []struct {
++		remote string
++		status int
++	}{
++		{"192.0.2.1:1234", http.StatusForbidden},
++		{"127.0.0.1:1234", http.StatusOK},
++		{"[::1]:1234", http.StatusOK},
++	} {
++		r := httptest.NewRecorder()
++		request := httptest.NewRequest(http.MethodGet, factory.PcfOamResUriPrefix+"/recovery-current", nil)
++		request.RemoteAddr = tc.remote
++		c, _ := gin.CreateTestContext(r)
++		c.Request = request
++		server.HTTPOAMGetRecoveryCurrent(c)
++		c.Writer.WriteHeaderNow()
++		if r.Code != tc.status {
++			t.Fatalf("remote=%s status=%d", tc.remote, r.Code)
++		}
++		if tc.status == http.StatusOK {
++			var receipt pcf_context.RecoveryCurrentReceipt
++			if err := json.Unmarshal(r.Body.Bytes(), &receipt); err != nil {
++				t.Fatal(err)
++			}
++			if !receipt.CurrentZero || !receipt.InventoryComplete || receipt.GateEpoch == "" ||
++				receipt.PriorEpochState != "unknown" || receipt.ExternalPolicyState != "unknown" ||
++				receipt.PriorEpochExternalNRFState != "unknown" ||
++				receipt.InventoryScope != "current-pcf-process-four-pools-only" ||
++				receipt.NRFRegistrationState != "disabled-by-quarantine" {
++				t.Fatalf("incorrect scope: %+v", receipt)
++			}
++		}
++	}
++}
++
++func TestRecoveryQuarantineMiddlewareRouteMatrix(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	ctx := &pcf_context.PCFContext{}
++	boot := pcf_context.BootReceipt{PodUID: "12345678-1234-1234-1234-123456789abc",
++		BootEpoch: "test-epoch", PreListenerPoolsEmpty: true, PriorEpochState: "unknown"}
++	if err := ctx.EnableRecoveryQuarantine(boot); err != nil {
++		t.Fatal(err)
++	}
++	router := gin.New()
++	router.Use(recoveryQuarantineMiddleware(ctx))
++	called := 0
++	for _, path := range []string{factory.PcfOamResUriPrefix + "/boot-receipt", factory.PcfOamResUriPrefix + "/recovery-current", factory.PcfOamResUriPrefix + "/am-policy/test",
++		"/npcf-smpolicycontrol/v1/sm-policies", "/npcf-am-policy-control/v1/policies", "/callbacks/test"} {
++		router.Any(path, func(c *gin.Context) { called++; c.Status(http.StatusNoContent) })
++	}
++	for _, tc := range []struct {
++		method, path string
++		allowed      bool
++	}{
++		{"GET", factory.PcfOamResUriPrefix + "/boot-receipt", true}, {"GET", factory.PcfOamResUriPrefix + "/recovery-current", true},
++		{"POST", factory.PcfOamResUriPrefix + "/recovery-current", false}, {"GET", factory.PcfOamResUriPrefix + "/am-policy/test", false},
++		{"POST", "/npcf-smpolicycontrol/v1/sm-policies", false},
++		{"POST", "/npcf-am-policy-control/v1/policies", false},
++		{"POST", "/callbacks/test", false},
++	} {
++		before := called
++		r := httptest.NewRecorder()
++		router.ServeHTTP(r, httptest.NewRequest(tc.method, tc.path, nil))
++		if tc.allowed && (r.Code != http.StatusNoContent || called != before+1) {
++			t.Errorf("allowed %s %s: status=%d called=%d", tc.method, tc.path, r.Code, called)
++		}
++		if !tc.allowed && (r.Code != http.StatusServiceUnavailable || called != before) {
++			t.Errorf("blocked %s %s: status=%d called=%d", tc.method, tc.path, r.Code, called)
++		}
++	}
++}
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index 622c0bf..ec71977 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/sirupsen/logrus"
+ 
+ 	"github.com/free5gc/openapi/models"
++	pcf_context "github.com/free5gc/pcf/internal/context"
+ 	"github.com/free5gc/pcf/internal/logger"
+ 	"github.com/free5gc/pcf/internal/sbi/consumer"
+ 	"github.com/free5gc/pcf/internal/sbi/processor"
+@@ -69,6 +70,7 @@ func NewServer(pcf pcf, tlsKeyLogPath string) (*Server, error) {
+ 	}
+ 
+ 	s.router.Use(metrics.InboundMetrics())
++	s.router.Use(recoveryQuarantineMiddleware(s.Context()))
+ 
+ 	smPolicyRoutes := s.getSmPolicyRoutes()
+ 	smPolicyGroup := s.router.Group(factory.PcfSMpolicyCtlResUriPrefix)
+@@ -136,9 +138,29 @@ func NewServer(pcf pcf, tlsKeyLogPath string) (*Server, error) {
+ 	return s, nil
+ }
+ 
++// The quarantine is installed before every SBI route. Only local OAM evidence
++// reads may reach a handler while recovery is active.
++func recoveryQuarantineMiddleware(ctx *pcf_context.PCFContext) gin.HandlerFunc {
++	return func(c *gin.Context) {
++		if ctx.RecoveryQuarantineEnabled() {
++			path := c.Request.URL.Path
++			allowed := c.Request.Method == http.MethodGet &&
++				(path == factory.PcfOamResUriPrefix+"/boot-receipt" ||
++					path == factory.PcfOamResUriPrefix+"/recovery-current")
++			if !allowed {
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
++		}
++		c.Next()
++	}
++}
++
+ func (s *Server) Run(traceCtx context.Context, wg *sync.WaitGroup) error {
+-	var err error
+-	_, s.Context().NfId, err = s.Consumer().SendRegisterNFInstance(s.CancelContext())
++	err := s.registerWithNRF(func() (string, error) {
++		_, id, err := s.Consumer().SendRegisterNFInstance(s.CancelContext())
++		return id, err
++	})
+ 	if err != nil {
+ 		logger.InitLog.Errorf("PCF register to NRF Error[%s]", err.Error())
+ 	}
+@@ -149,6 +171,17 @@ func (s *Server) Run(traceCtx context.Context, wg *sync.WaitGroup) error {
+ 	return nil
+ }
+ 
++func (s *Server) registerWithNRF(register func() (string, error)) error {
++	// An empty recovery process must not advertise itself as a usable PCF.
++	// Existing NRF profiles and AMF/SMF caches remain outside this process.
++	if s.Context().RecoveryQuarantineEnabled() {
++		return nil
++	}
++	id, err := register()
++	s.Context().NfId = id
++	return err
++}
++
+ func (s *Server) Shutdown(traceCtx context.Context) {
+ 	const defaultShutdownTimeout time.Duration = 2 * time.Second
+ 
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+index 2df7fbc..3d707cd 100644
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -2,6 +2,8 @@ package service
+ 
+ import (
+ 	"context"
++	"encoding/json"
++	"fmt"
+ 	"io"
+ 	"os"
+ 	"runtime/debug"
+@@ -55,6 +57,32 @@ func NewApp(
+ 	pcf.ctx, pcf.cancel = context.WithCancel(ctx)
+ 	pcf_context.Init()
+ 	pcf.pcfCtx = pcf_context.GetSelf()
++	// Capture and log the new process's empty-policy state before any SBI
++	// listener, NRF registration, or policy handler can run. This says nothing
++	// about the previous PCF process or downstream SMF/UPF state.
++	bootReceipt, err := pcf_context.CaptureBootReceipt(os.Getenv("CITYVERSE_PCF_POD_UID"))
++	if err != nil {
++		return nil, err
++	}
++	quarantineMode := os.Getenv("CITYVERSE_PCF_RECOVERY_QUARANTINE")
++	if quarantineMode != "" && quarantineMode != "1" {
++		return nil, fmt.Errorf("invalid PCF recovery quarantine mode")
++	}
++	if quarantineMode == "1" {
++		if err := pcf.pcfCtx.EnableRecoveryQuarantine(bootReceipt); err != nil {
++			return nil, err
++		}
++	}
++	bootJSON, err := json.Marshal(bootReceipt)
++	if err != nil {
++		return nil, err
++	}
++	line := append(append([]byte("CITYVERSE_PCF_BOOT_EMPTY "), bootJSON...), '\n')
++	if written, err := os.Stdout.Write(line); err != nil {
++		return nil, err
++	} else if written != len(line) {
++		return nil, io.ErrShortWrite
++	}
+ 
+ 	// consumer
+ 	consumer, err := consumer.NewConsumer(pcf)
+@@ -217,6 +245,12 @@ func (a *PcfApp) Terminate() {
+ func (a *PcfApp) terminateProcedure() {
+ 	logger.MainLog.Infof("Terminating PCF...")
+ 	a.CallServerStop()
++	if a.pcfCtx.RecoveryQuarantineEnabled() {
++		// No registration was made by this process. Never delete an NRF
++		// profile that may belong to an earlier PCF incarnation.
++		logger.InitLog.Info("PCF recovery quarantine: skipping NRF deregistration")
++		return
++	}
+ 	// deregister with NRF
+ 	problemDetails, err := a.Consumer().SendDeregisterNFInstance()
+ 	if problemDetails != nil {
+diff --git a/pkg/service/recovery_quarantine_test.go b/pkg/service/recovery_quarantine_test.go
+new file mode 100644
+index 0000000..d34f6e4
+--- /dev/null
++++ b/pkg/service/recovery_quarantine_test.go
+@@ -0,0 +1,19 @@
++package service
++
++import (
++	"testing"
++
++	pcf_context "github.com/free5gc/pcf/internal/context"
++)
++
++func TestRecoveryTerminationSkipsNRFDeregister(t *testing.T) {
++	ctx := &pcf_context.PCFContext{NfId: "prior-id-unknown"}
++	boot := pcf_context.BootReceipt{PodUID: "12345678-1234-1234-1234-123456789abc",
++		BootEpoch: "test-epoch", PreListenerPoolsEmpty: true, PriorEpochState: "unknown"}
++	if err := ctx.EnableRecoveryQuarantine(boot); err != nil {
++		t.Fatal(err)
++	}
++	app := &PcfApp{pcfCtx: ctx}
++	// A nil consumer would panic if termination tried to deregister.
++	app.terminateProcedure()
++}

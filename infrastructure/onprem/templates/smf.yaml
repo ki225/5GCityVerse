@@ -1,0 +1,96 @@
+{{- $topology := dict -}}
+{{- range $name, $slice := .Values.city.slices -}}
+{{- $_ := set $topology $name (dict "sst" $slice.sst "sd" $slice.sd "uePool" $slice.uePool "n3Subnet" $slice.n3Subnet "n4Address" $slice.n4Address) -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: smf-config
+  namespace: {{ .Release.Namespace }}
+data:
+  smfcfg.yaml: |
+    info: {version: 1.0.7, description: City four-slice topology}
+    configuration:
+      smfName: SMF
+      sbi: {scheme: http, registerIPv4: smf, bindingIPv4: 0.0.0.0, port: 8000}
+      serviceNameList: [nsmf-pdusession, nsmf-event-exposure, nsmf-oam]
+      nrfUri: http://nrf-nnrf:8000
+      pfcp:
+        nodeID: 172.22.4.10
+        listenAddr: 172.22.4.10
+        externalAddr: 172.22.4.10
+        heartbeatInterval: 5s
+        assocFailRetryInterval: 5s
+        assocFailAlertInterval: 5m
+      snssaiInfos:
+      {{- range $slice := .Values.city.slices }}
+        - sNssai: {sst: {{ $slice.sst }}, sd: {{ $slice.sd | quote }}}
+          dnnInfos: [{dnn: internet, dns: {ipv4: 1.1.1.1}}]
+      {{- end }}
+      plmnList: [{mcc: "208", mnc: "93"}]
+      userplaneInformation:
+        upNodes:
+          ran-access: {type: AN}
+        {{- range $name, $slice := .Values.city.slices }}
+          upf-{{ $name }}:
+            type: UPF
+            nodeID: {{ $slice.n4Address }}
+            addr: {{ $slice.n4Address }}
+            sNssaiUpfInfos:
+              - sNssai: {sst: {{ $slice.sst }}, sd: {{ $slice.sd | quote }}}
+                dnnUpfInfoList: [{dnn: internet, pools: [{cidr: {{ $slice.uePool }}}]}]
+            interfaces:
+              - {interfaceType: N3, endpoints: [{{ $slice.n3Subnet }}.10], networkInstances: [internet]}
+        {{- end }}
+        links:
+        {{- range $name, $_ := .Values.city.slices }}
+          - {A: ran-access, B: upf-{{ $name }}}
+        {{- end }}
+      locality: area1
+      urrPeriod: 10
+      urrThreshold: 1000000
+      requestedUnit: 1000
+      t3591: {enable: true, expireTime: 16s, maxRetryTimes: 3}
+      t3592: {enable: true, expireTime: 16s, maxRetryTimes: 3}
+    logger: {enable: true, level: info, reportCaller: false}
+  uerouting.yaml: |
+    info: {version: 1.0.7, description: Per-slice selection}
+    ueRoutingInfo: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smf
+  namespace: {{ .Release.Namespace }}
+  labels: {cityverse.io/site: {{ .Values.city.core.smf.site }}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: smf, cityverse.io/runtime: kubeadm, cityverse.io/role: core}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: smf, cityverse.io/runtime: kubeadm, cityverse.io/role: core, cityverse.io/site: {{ .Values.city.core.smf.site }}}
+      annotations:
+        checksum/config: {{ $topology | toJson | sha256sum }}
+        k8s.v1.cni.cncf.io/networks: '[{"name":"n4","interface":"n4","ips":["172.22.4.10/24"]}]'
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {{ include "cityverse.selector" (list . .Values.city.core.smf.site) | nindent 8 }}
+      containers:
+        - name: smf
+          image: {{ .Values.images.smf }}
+          command: [/free5gc/smf, -c, /etc/cityverse/smfcfg.yaml, -u, /etc/cityverse/uerouting.yaml]
+          env: [{name: SMF_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000005"}]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {{ .Values.city.core.smf.resources | toYaml | nindent 12 }}
+          readinessProbe: {tcpSocket: {port: 8000}, periodSeconds: 5}
+          volumeMounts: [{name: config, mountPath: /etc/cityverse, readOnly: true}]
+      volumes: [{name: config, configMap: {name: smf-config}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: smf, namespace: {{ .Release.Namespace }}}
+spec:
+  selector: {app.kubernetes.io/name: smf}
+  ports: [{name: sbi, port: 8000, targetPort: 8000}]

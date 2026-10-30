@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!Dockerfile.dockerignore
+!source/
+!source/**
+source/.git
+source/**/.git

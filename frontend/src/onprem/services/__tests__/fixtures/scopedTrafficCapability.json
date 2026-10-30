@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "cityverse.scoped-traffic-capabilities/v1",
+  "profileId": "web_browsing",
+  "verifiedDevices": 0,
+  "scope": {
+    "profileId": "web_browsing",
+    "devices": 100,
+    "pdusPerDevice": 1,
+    "slice": "embb",
+    "trafficMode": "qos",
+    "offeredUplinkKbpsPerDevice": 100,
+    "offeredDownlinkKbpsPerDevice": 100,
+    "requirementsSchema": "cityverse.service-requirements/v2",
+    "topologyRevision": 1,
+    "demandGroups": [
+      {
+        "groupId": "web-0",
+        "profileId": "web_browsing",
+        "ueCount": 25,
+        "sourceLocation": {
+          "type": "point",
+          "position": {
+            "x": 2.2,
+            "y": 2.2
+          }
+        }
+      },
+      {
+        "groupId": "web-1",
+        "profileId": "web_browsing",
+        "ueCount": 25,
+        "sourceLocation": {
+          "type": "point",
+          "position": {
+            "x": 18,
+            "y": 6
+          }
+        }
+      },
+      {
+        "groupId": "web-2",
+        "profileId": "web_browsing",
+        "ueCount": 25,
+        "sourceLocation": {
+          "type": "point",
+          "position": {
+            "x": 6,
+            "y": 18
+          }
+        }
+      },
+      {
+        "groupId": "web-3",
+        "profileId": "web_browsing",
+        "ueCount": 25,
+        "sourceLocation": {
+          "type": "point",
+          "position": {
+            "x": 18,
+            "y": 18
+          }
+        }
+      }
+    ]
+  },
+  "validUntil": null,
+  "policyWritesAllowed": false,
+  "uePduReady": false,
+  "evidenceId": null
+}

@@ -1,0 +1,105 @@
+{
+  "description": "Offline fake-native producer and projector fixture; not live evidence",
+  "wrapper": {
+    "schemaVersion": "cityverse.native-session-bindings/v1",
+    "source": "native-free-ran-ue-typed-cohort/v1",
+    "roundId": "04c92318-5f70-4e2a-8303-6dfbb86c07cb",
+    "generation": 1,
+    "populationRevision": 0,
+    "observedAt": "1970-01-01T00:01:50+00:00",
+    "validUntil": "1970-01-01T00:02:05+00:00",
+    "openedAt": 110,
+    "closedAt": 110,
+    "openingCensusDigest": "3f9838755cc21d17297b477e8ad0881a7de2b949ebbe2e43c62636eac0f41e73",
+    "closingCensusDigest": "3f9838755cc21d17297b477e8ad0881a7de2b949ebbe2e43c62636eac0f41e73",
+    "deviceCount": 100,
+    "sessionCount": 100,
+    "cohortDigest": "16351de6543702a4c3a31361bf6495ee9a1185d56766b4d601140a02ebc16b06",
+    "allocationDigest": "574545cdc49ecb589d2ab230ae6370a175456f889f5a600680a7ea5aab4d93a3",
+    "heldAllocationRef": "2b7354aaec4d1e6037c3b89b09fb092385e78a5e4a376814bd1c869123fcb2e2",
+    "bindingsDigest": "a3a8aa532bf947d92f054d75514bd67a73525741086cf23cbd7a2a4e014d5a7d",
+    "available": true
+  },
+  "binding": {
+    "sessionKey": "[\"network\",\"imsi-208930100000001\",1,\"native-session-0\"]",
+    "deviceId": "device-0",
+    "supi": "imsi-208930100000001",
+    "pduSessionId": 1,
+    "sessionId": 1,
+    "establishedEpoch": "native-session-0",
+    "smContextRef": "native-session-0",
+    "podUid": "actual-ue-0",
+    "generation": 1,
+    "snssai": "1-000001",
+    "dnn": "internet",
+    "upf": "edge",
+    "nativeUpfId": "00000000-0000-0000-0000-000000000001",
+    "upfEpoch": "kernel-1",
+    "ueIp": "10.101.0.2",
+    "tun": "ueTun0",
+    "slice": "embb",
+    "containerId": "container-ue-0",
+    "processEpoch": "00000000-0000-0000-0000-000000000000:1000",
+    "sst": 1,
+    "sd": 1,
+    "pfcpSeid": "1",
+    "proof": {
+      "source": "native-free-ran-ue-single-session/v2",
+      "observedAt": "1970-01-01T00:01:50+00:00",
+      "sessionKey": "[\"network\",\"imsi-208930100000001\",1,\"native-session-0\"]",
+      "amf_registered": true,
+      "mm_registration_source": "native-amf-current-registration+free-ran-gnb-api",
+      "smf_active": true,
+      "pfcp_kernel_verified": true,
+      "tun_present": true,
+      "connectivity_verified": true,
+      "gnbSearchEndpoint": "gnb-ne.core.svc.cluster.local",
+      "gnbPodUid": "native-gnb",
+      "spatialRan": {
+        "source": "native-free-ran-ue-single-session/v2",
+        "supi": "imsi-208930100000001",
+        "demandGroupId": "video-ne",
+        "gnbId": "gnb-ne",
+        "servingCellId": "gnb-2-6",
+        "gnbPodUid": "native-gnb",
+        "gnbSearchEndpoint": "gnb-ne.core.svc.cluster.local",
+        "gnbN3Address": "172.22.31.131",
+        "pdr_far_gnb_verified": true,
+        "observedAt": "1970-01-01T00:01:50+00:00",
+        "vendor": "free-ran-ue",
+        "gnbIncarnation": {
+          "podUid": "native-gnb",
+          "containerId": "gnb-container"
+        },
+        "amfIncarnation": {
+          "podUid": "native-amf",
+          "containerId": "amf-container"
+        },
+        "peer": {
+          "ngSetupState": "CONNECTED",
+          "gnbAssociationId": "1",
+          "amfAssociationId": "2"
+        }
+      },
+      "smfBootEpoch": "smf-boot",
+      "upfEpoch": "kernel-1",
+      "podUid": "actual-ue-0",
+      "containerId": "container-ue-0",
+      "processEpoch": "00000000-0000-0000-0000-000000000000:1000"
+    },
+    "scenario": "video_streaming",
+    "logicalSessionId": "video_streaming",
+    "service_type": "video",
+    "region": "stadium",
+    "sourceLocation": {
+      "type": "point",
+      "position": {
+        "x": 18,
+        "y": 6
+      }
+    },
+    "demandGroupId": "video-ne",
+    "servingCellId": "gnb-2-6",
+    "nonceDigest": "59e13ca18bf1134acacdcd663aaa5319ff73dee14f0255a0677cafc9dca7c7b6"
+  }
+}

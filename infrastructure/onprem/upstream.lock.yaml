@@ -1,0 +1,5 @@
+repository: https://github.com/free5gc/free5gc-helm.git
+tag: v4.2.2
+revision: 0d0b4b392bbb1b099acb9a1b37c39e0647ff6d4c
+chart: charts/free5gc
+chartVersion: 1.1.7

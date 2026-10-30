@@ -1,0 +1,193 @@
+{
+  "note": "Explicit test doubles only. No native connectivity, AI completion or service effect is asserted.",
+  "round": {
+    "roundId": null,
+    "requestId": null,
+    "generation": null,
+    "sequence": 0,
+    "policyRevision": 0,
+    "stage": "idle",
+    "cleanupStatus": "verified",
+    "executionOutcome": null,
+    "observedAt": null,
+    "allocation": {
+      "baselineUes": 0,
+      "events": {
+        "video_streaming": 0,
+        "realtime_control": 0,
+        "connected_traffic": 0,
+        "factory_iot": 0
+      },
+      "total": 0
+    },
+    "counts": {
+      "allocated": 0,
+      "registered": 0,
+      "pduEstablished": 0,
+      "trafficVerified": 0
+    },
+    "perUe": [],
+    "measurements": [],
+    "actions": [],
+    "errors": [],
+    "capabilities": {
+      "start": true,
+      "applicationMaxUes": 100,
+      "verifiedMaxUes": 0,
+      "verifiedMaxUesScope": "scenario-offered-load-v1",
+      "candidateMaxUes": 5,
+      "admissionMaxUes": 5,
+      "commissioningEnabled": true,
+      "commissioningProfile": "scenario-offered-load-v1",
+      "staticPolicy": false,
+      "aiPolicy": false
+    }
+  },
+  "services": {
+    "schemaVersion": "cityverse.service-requirements/v2",
+    "protocols": [
+      "udp"
+    ],
+    "maxOfferedKbpsPerUePerDirection": 4000,
+    "maxEvaluationWindowSeconds": 3600,
+    "minSampleIntervalSeconds": 1,
+    "rtt": {
+      "statistic": "mean",
+      "sameTrafficWindowAvailable": false,
+      "reason": "adjacent probe"
+    },
+    "cityAccessCatalog": {
+      "source": "operator-configuration",
+      "topologyRevision": 1,
+      "spatialRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "coordinateUnit": "km",
+      "nativeConnectivityVerified": false
+    },
+    "trafficDefaults": {
+      "web_browsing": {
+        "slice": "embb",
+        "protocol": "udp",
+        "offeredUplinkMbpsPerUe": 0.1,
+        "offeredDownlinkMbpsPerUe": 1
+      },
+      "video_streaming": {
+        "slice": "embb",
+        "protocol": "udp",
+        "offeredUplinkMbpsPerUe": 0.2,
+        "offeredDownlinkMbpsPerUe": 4
+      },
+      "realtime_control": {
+        "slice": "urllc",
+        "protocol": "udp",
+        "offeredUplinkMbpsPerUe": 0.2,
+        "offeredDownlinkMbpsPerUe": 0.2
+      },
+      "connected_traffic": {
+        "slice": "v2x",
+        "protocol": "udp",
+        "offeredUplinkMbpsPerUe": 0.1,
+        "offeredDownlinkMbpsPerUe": 0.1
+      },
+      "factory_iot": {
+        "slice": "mmtc",
+        "protocol": "udp",
+        "offeredUplinkMbpsPerUe": 0.01,
+        "offeredDownlinkMbpsPerUe": 0.001
+      }
+    },
+    "profileCatalog": {
+      "schemaVersion": "cityverse.service-profile-catalog/v1",
+      "revision": 1,
+      "profiles": [
+        {
+          "id": "web_browsing",
+          "name": "日常上網",
+          "slice": "embb",
+          "description": "傳訊息、瀏覽網頁、查地圖",
+          "trafficModel": "constant-udp",
+          "offeredUplinkMbpsPerUe": 0.1,
+          "offeredDownlinkMbpsPerUe": 1
+        },
+        {
+          "id": "video_streaming",
+          "name": "觀看影音",
+          "slice": "embb",
+          "description": "看影片、短影音、直播",
+          "trafficModel": "constant-udp",
+          "offeredUplinkMbpsPerUe": 0.2,
+          "offeredDownlinkMbpsPerUe": 4
+        },
+        {
+          "id": "realtime_control",
+          "name": "即時設備控制",
+          "slice": "urllc",
+          "description": "機械手臂、倉儲搬運設備控制",
+          "trafficModel": "constant-udp",
+          "offeredUplinkMbpsPerUe": 0.2,
+          "offeredDownlinkMbpsPerUe": 0.2
+        },
+        {
+          "id": "connected_traffic",
+          "name": "聯網交通",
+          "slice": "v2x",
+          "description": "車輛與路口交換位置、通行資訊",
+          "trafficModel": "constant-udp",
+          "offeredUplinkMbpsPerUe": 0.1,
+          "offeredDownlinkMbpsPerUe": 0.1
+        },
+        {
+          "id": "factory_iot",
+          "name": "工廠 IoT",
+          "slice": "mmtc",
+          "description": "溫度、震動、電表與設備狀態回報",
+          "trafficModel": "constant-udp",
+          "offeredUplinkMbpsPerUe": 0.01,
+          "offeredDownlinkMbpsPerUe": 0.001
+        }
+      ]
+    }
+  },
+  "formalCapabilities": {
+    "actions": [],
+    "write_configured": true,
+    "planner_available": true,
+    "observation_available": true
+  },
+  "payload": {
+    "text": "Protect the specified video_streaming service for 60 seconds within authorized policy and resource budgets.",
+    "city_traffic": {
+      "schemaVersion": "cityverse.city-traffic/v2",
+      "requestId": "owned-city-fixture",
+      "strategy": "none",
+      "trafficMode": "qos",
+      "topologyRevision": 1,
+      "demandGroups": [
+        {
+          "groupId": "building:arena",
+          "profileId": "video_streaming",
+          "ueCount": 1,
+          "sourceLocation": {
+            "type": "point",
+            "buildingId": "arena",
+            "position": {
+              "x": 18.5,
+              "y": 4.5
+            }
+          }
+        }
+      ],
+      "serviceRequirements": {
+        "schemaVersion": "cityverse.service-requirements/v2",
+        "services": {
+          "video_streaming": {
+            "traffic": {
+              "protocol": "udp",
+              "offeredUplinkMbpsPerUe": 1,
+              "offeredDownlinkMbpsPerUe": 2
+            }
+          }
+        }
+      }
+    }
+  }
+}

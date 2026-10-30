@@ -1,0 +1,35 @@
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -89,7 +89,19 @@ func (s *nnrfService) SendSearchNFInstances(nrfUri string, targetNfType, requ
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	res, err := client.NFInstancesStoreApi.SearchNFInstances(ctx, param)
++	var res *Nnrf_NFDiscovery.SearchNFInstancesResponse
++	for attempt := 0; attempt < 3; attempt++ {
++		res, err = client.NFInstancesStoreApi.SearchNFInstances(ctx, param)
++		if err == nil || !retryableAMFNRFDiscoveryError(err) || attempt == 2 {
++			break
++		}
++		logger.ConsumerLog.Warnf("Transient NRF discovery transport failure; retry %d/2: %v", attempt+1, err)
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-time.After(time.Duration(50*(attempt+1)) * time.Millisecond):
++		}
++	}
+ 	var result *models.SearchResult
+ 	if err != nil {
+ 		logger.ConsumerLog.Errorf("SearchNFInstances failed: %+v", err)
+@@ -100,4 +112,10 @@ func (s *nnrfService) SendSearchNFInstances(nrfUri string, targetNfType, requ
+ 	return result, err
+ }
+ 
++// NRF discovery is an idempotent GET. A failed HTTP/2 connection setup is
++// retryable; an actual NRF response is not.
++func retryableAMFNRFDiscoveryError(err error) bool {
++	return err != nil && strings.Contains(err.Error(), "http2: client conn could not be established")
++}
++
+ func (s *nnrfService) SearchUdmSdmInstance(

@@ -1,0 +1,74 @@
+{{- range $name, $slice := .Values.city.slices }}
+{{- $labels := dict "app.kubernetes.io/name" (printf "upf-%s" $name) "cityverse.io/runtime" "kubeadm" "cityverse.io/role" "upf" "cityverse.io/component" "upf" "cityverse.io/slice" $name }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upf-{{ $name }}-config
+  namespace: {{ $.Release.Namespace }}
+data:
+  upfcfg.yaml: |
+    version: 1.0.3
+    description: {{ $name }} dedicated UPF
+    pfcp:
+      addr: {{ $slice.n4Address }}
+      nodeID: {{ $slice.n4Address }}
+      retransTimeout: 1s
+      maxRetrans: 3
+    gtpu:
+      forwarder: gtp5g
+      ifList:
+        - {addr: {{ $slice.n3Subnet }}.10, type: N3}
+    dnnList:
+      - {dnn: internet, cidr: {{ $slice.uePool }}, natifname: n6}
+    logger: {enable: true, level: info, reportCaller: false}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upf-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels: {cityverse.io/site: {{ $slice.site }}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {{ $labels | toYaml | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- $labels | toYaml | nindent 8 }}
+        cityverse.io/site: {{ $slice.site }}
+      annotations:
+        checksum/config: {{ dict "uePool" $slice.uePool "n3Subnet" $slice.n3Subnet "n4Address" $slice.n4Address "n6Subnet" $slice.n6Subnet | toJson | sha256sum }}
+        k8s.v1.cni.cncf.io/networks: {{ list (dict "name" (printf "n3-%s" $name) "interface" "n3" "ips" (list (printf "%s.10/24" $slice.n3Subnet))) (dict "name" "n4" "interface" "n4" "ips" (list (printf "%s/24" $slice.n4Address))) (dict "name" (printf "n6-%s" $name) "interface" "n6" "ips" (list (printf "%s.10/24" $slice.n6Subnet))) | toJson | quote }}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        {{- include "cityverse.selector" (list $ $slice.site) | nindent 8 }}
+        cityverse.io/gtp5g-ready: "true"
+      containers:
+        - name: upf-{{ $name }}
+          image: {{ $.Values.images.upf }}
+          securityContext: {privileged: true}
+          resources: {{ $slice.resources | toYaml | nindent 12 }}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              echo 1 > /proc/sys/net/ipv4/ip_forward
+              iptables -C FORWARD -j ACCEPT 2>/dev/null || iptables -A FORWARD -j ACCEPT
+              iptables -t nat -C POSTROUTING -s {{ $slice.uePool }} -o n6 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {{ $slice.uePool }} -o n6 -j MASQUERADE
+              ip rule show | grep -Fq 'from {{ $slice.uePool }} lookup 1200' || ip rule add from {{ $slice.uePool }} table 1200
+              ip route replace {{ $slice.n6Subnet }}.0/24 dev n6 table 1200
+              ip route replace default via {{ $slice.n6Subnet }}.1 dev n6 table 1200
+              exec /free5gc/upf -c /etc/cityverse/upfcfg.yaml
+          readinessProbe:
+            exec: {command: [/bin/sh, -ec, "ip link show upfgtp; grep -qi ':2265 ' /proc/net/udp"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - {name: config, mountPath: /etc/cityverse, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: upf-{{ $name }}-config}
+{{- end }}

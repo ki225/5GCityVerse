@@ -1,0 +1,185 @@
+diff --git a/internal/sbi/consumer/nssf_service.go b/internal/sbi/consumer/nssf_service.go
+index 9c6163f..e632f3f 100644
+--- a/internal/sbi/consumer/nssf_service.go
++++ b/internal/sbi/consumer/nssf_service.go
+@@ -1,7 +1,13 @@
+ package consumer
+ 
+ import (
++	"context"
++	"errors"
++	"fmt"
++	"net/url"
++	"strings"
+ 	"sync"
++	"time"
+ 
+ 	amf_context "github.com/free5gc/amf/internal/context"
+ 	"github.com/free5gc/openapi"
+@@ -18,6 +24,57 @@ type nssfService struct {
+ 	NSSelectionClients map[string]*Nnssf_NSSelection.APIClient
+ }
+ 
++// retryNssfPduSelectionGet is only for the idempotent NSSF selection GET.
++// x/net/http2 emits this error when a new ClientConn closes before its first
++// request is sent; no NSSF response or side effect can have occurred.
++func retryNssfPduSelectionGet(ctx context.Context,
++	get func(context.Context) (*Nnssf_NSSelection.NSSelectionGetResponse, error),
++	onRetry func(error),
++) (*Nnssf_NSSelection.NSSelectionGetResponse, error) {
++	ctx, cancel := context.WithTimeout(ctx, 21*time.Second)
++	defer cancel()
++	response, firstErr := get(ctx)
++	if !isNssfNewConnectionFailure(firstErr) {
++		return response, firstErr
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, fmt.Errorf("NSSF GET transport failure %v; retry cancelled: %w", firstErr, err)
++	}
++	if onRetry != nil {
++		onRetry(firstErr)
++	}
++	timer := time.NewTimer(100 * time.Millisecond)
++	defer timer.Stop()
++	select {
++	case <-timer.C:
++	case <-ctx.Done():
++		return nil, fmt.Errorf("NSSF GET transport failure %v; retry cancelled: %w", firstErr, ctx.Err())
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, fmt.Errorf("NSSF GET transport failure %v; retry cancelled: %w", firstErr, err)
++	}
++	response, retryErr := get(ctx)
++	if retryErr != nil {
++		// Preserve GenericOpenAPIError's concrete type: the caller maps its
++		// ProblemDetails via a direct type switch. The first error was logged.
++		return nil, retryErr
++	}
++	return response, nil
++}
++
++func isNssfNewConnectionFailure(err error) bool {
++	if err == nil {
++		return false
++	}
++	var apiErr openapi.GenericOpenAPIError
++	if errors.As(err, &apiErr) { // any NSSF HTTP response is semantic, never retry
++		return false
++	}
++	var urlErr *url.Error
++	return errors.As(err, &urlErr) && urlErr.Err != nil &&
++		strings.Contains(urlErr.Err.Error(), "http2: client conn could not be established")
++}
++
+ func (s *nssfService) getNSSelectionClient(uri string) *Nnssf_NSSelection.APIClient {
+ 	if uri == "" {
+ 		return nil
+@@ -135,7 +192,14 @@ func (s *nssfService) NSSelectionGetForPduSession(ue *amf_context.AmfUe, snssai
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+-	res, localErr := client.NetworkSliceInformationDocumentApi.NSSelectionGet(ctx, &paramOpt)
++	res, localErr := retryNssfPduSelectionGet(ctx, func(requestCtx context.Context) (
++		*Nnssf_NSSelection.NSSelectionGetResponse, error,
++	) {
++		return client.NetworkSliceInformationDocumentApi.NSSelectionGet(requestCtx, &paramOpt)
++	}, func(firstErr error) {
++		ue.GmmLog.Warnf("NSSF GET retrying one new-connection failure supi=%s snssai=%+v originalErr=%v",
++			ue.Supi, snssai, firstErr)
++	})
+ 
+ 	if localErr == nil {
+ 		return &res.AuthorizedNetworkSliceInfo, nil, nil
+diff --git a/internal/sbi/consumer/nssf_retry_test.go b/internal/sbi/consumer/nssf_retry_test.go
+new file mode 100644
+index 0000000..1fdb1b1
+--- /dev/null
++++ b/internal/sbi/consumer/nssf_retry_test.go
+@@ -0,0 +1,87 @@
++package consumer
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/url"
++	"testing"
++
++	"github.com/free5gc/openapi"
++	Nnssf_NSSelection "github.com/free5gc/openapi/nssf/NSSelection"
++)
++
++func TestNssfPduGetRetryFirstNewConnectionFailure(t *testing.T) {
++	calls, logged := 0, 0
++	want := &Nnssf_NSSelection.NSSelectionGetResponse{}
++	got, err := retryNssfPduSelectionGet(context.Background(),
++		func(context.Context) (*Nnssf_NSSelection.NSSelectionGetResponse, error) {
++			calls++
++			if calls == 1 {
++				return nil, &url.Error{Op: "Get", URL: "http://nssf:8000", Err: errors.New("http2: client conn could not be established")}
++			}
++			return want, nil
++		}, func(error) { logged++ })
++	if err != nil || got != want || calls != 2 || logged != 1 {
++		t.Fatalf("response=%p error=%v calls=%d logged=%d", got, err, calls, logged)
++	}
++}
++
++func TestNssfPduGetDoesNotRetrySemanticResponse(t *testing.T) {
++	for _, status := range []int{400, 404, 500} {
++		t.Run(fmt.Sprint(status), func(t *testing.T) {
++			calls := 0
++			semantic := openapi.GenericOpenAPIError{ErrorStatus: status}
++			_, err := retryNssfPduSelectionGet(context.Background(),
++				func(context.Context) (*Nnssf_NSSelection.NSSelectionGetResponse, error) {
++					calls++
++					return nil, semantic
++				}, nil)
++			if err == nil || calls != 1 {
++				t.Fatalf("error=%v calls=%d", err, calls)
++			}
++		})
++	}
++}
++
++func TestNssfPduGetDoesNotRetryOtherTransportError(t *testing.T) {
++	calls := 0
++	_, _ = retryNssfPduSelectionGet(context.Background(),
++		func(context.Context) (*Nnssf_NSSelection.NSSelectionGetResponse, error) {
++			calls++
++			return nil, &url.Error{Op: "Get", URL: "http://nssf:8000", Err: errors.New("connection refused")}
++		}, nil)
++	if calls != 1 {
++		t.Fatalf("calls=%d", calls)
++	}
++}
++
++func TestNssfPduGetTransientThenSemanticResponsePreservesType(t *testing.T) {
++	calls := 0
++	_, err := retryNssfPduSelectionGet(context.Background(),
++		func(context.Context) (*Nnssf_NSSelection.NSSelectionGetResponse, error) {
++			calls++
++			if calls == 1 {
++				return nil, &url.Error{Op: "Get", URL: "http://nssf:8000", Err: errors.New("http2: client conn could not be established")}
++			}
++			return nil, openapi.GenericOpenAPIError{ErrorStatus: 400}
++		}, nil)
++	_, concrete := err.(openapi.GenericOpenAPIError)
++	if !concrete || calls != 2 {
++		t.Fatalf("error=%T %v calls=%d", err, err, calls)
++	}
++}
++
++func TestNssfPduGetCancelledContextPreventsRetry(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	calls := 0
++	_, err := retryNssfPduSelectionGet(ctx,
++		func(context.Context) (*Nnssf_NSSelection.NSSelectionGetResponse, error) {
++			calls++
++			cancel()
++			return nil, &url.Error{Op: "Get", URL: "http://nssf:8000", Err: errors.New("http2: client conn could not be established")}
++		}, nil)
++	if !errors.Is(err, context.Canceled) || calls != 1 {
++		t.Fatalf("error=%v calls=%d", err, calls)
++	}
++}

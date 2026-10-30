@@ -1,0 +1,69 @@
+{
+  "schema": "cityverse.intent-configuration/v1",
+  "placement": {
+    "REPLACE_WITH_OWNED_INTENT_ID": {
+      "workloads": [
+        {
+          "workload_id": "upf-embb",
+          "kind": "nf",
+          "nf_type": "UPF",
+          "template_id": "REPLACE_WITH_COMMISSIONED_UPF_TEMPLATE",
+          "slice_scope": [
+            "1-010203"
+          ],
+          "allowed_site_ids": [
+            "edge-ne",
+            "distributed"
+          ],
+          "min_instances": 1,
+          "max_instances": 2
+        },
+        {
+          "workload_id": "video-service",
+          "kind": "application",
+          "template_id": "REPLACE_WITH_COMMISSIONED_APPLICATION_TEMPLATE",
+          "slice_scope": [
+            "1-010203"
+          ],
+          "allowed_site_ids": [
+            "edge-ne",
+            "distributed"
+          ],
+          "min_instances": 1,
+          "max_instances": 2
+        }
+      ],
+      "slots": [
+        {
+          "instance_id": "upf-embb-edge-ne-1",
+          "workload_id": "upf-embb",
+          "node_id": "commissioned-edge-ne"
+        },
+        {
+          "instance_id": "upf-embb-distributed-1",
+          "workload_id": "upf-embb",
+          "node_id": "commissioned-distributed"
+        },
+        {
+          "instance_id": "video-service-edge-ne-1",
+          "workload_id": "video-service",
+          "node_id": "commissioned-edge-ne"
+        },
+        {
+          "instance_id": "video-service-distributed-1",
+          "workload_id": "video-service",
+          "node_id": "commissioned-distributed"
+        }
+      ],
+      "demands": [
+        {
+          "group_id": "commissioned-video_streaming-group",
+          "serving_cell_id": "cell-r1-c6",
+          "weight": 1,
+          "upf_workload_id": "upf-embb",
+          "application_workload_id": "video-service"
+        }
+      ]
+    }
+  }
+}

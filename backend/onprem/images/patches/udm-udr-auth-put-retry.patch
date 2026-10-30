@@ -1,0 +1,41 @@
+diff --git a/internal/sbi/processor/generate_auth_data.go b/internal/sbi/processor/generate_auth_data.go
+--- a/internal/sbi/processor/generate_auth_data.go
++++ b/internal/sbi/processor/generate_auth_data.go
+@@ -87,8 +87,22 @@ func (p *Processor) ConfirmAuthDataProcedure(c *gin.Context,
+ 		return
+ 	}
+ 
+-	_, err = client.AuthenticationStatusDocumentApi.CreateAuthenticationStatus(
+-		ctx, &createAuthStatusRequest)
++	for attempt := 0; attempt < 3; attempt++ {
++		_, err = client.AuthenticationStatusDocumentApi.CreateAuthenticationStatus(
++			ctx, &createAuthStatusRequest)
++		if err == nil || !retryableAuthStatusPutError(err) || attempt == 2 {
++			break
++		}
++		logger.UeauLog.Warnf("Transient UDR auth-status PUT transport failure; retry %d/2: %v", attempt+1, err)
++		select {
++		case <-ctx.Done():
++			err = ctx.Err()
++		case <-time.After(time.Duration(50*(attempt+1)) * time.Millisecond):
++		}
++		if ctx.Err() != nil {
++			break
++		}
++	}
+ 	if err != nil {
+ 		apiError, ok := err.(openapi.GenericOpenAPIError)
+ 		if ok {
+@@ -107,6 +121,12 @@ func (p *Processor) ConfirmAuthDataProcedure(c *gin.Context,
+ 	c.JSON(http.StatusCreated, gin.H{})
+ }
+ 
++// PUT is idempotent. Limit retries to connection establishment failure,
++// not an HTTP response or a semantic UDR rejection.
++func retryableAuthStatusPutError(err error) bool {
++	return err != nil && strings.Contains(err.Error(), "http2: client conn could not be established")
++}
++
+ func (p *Processor) GenerateAuthDataProcedure(
+ 	c *gin.Context,
+ 	authInfoRequest models.AuthenticationInfoRequest,

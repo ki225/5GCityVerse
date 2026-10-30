@@ -1,0 +1,33 @@
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -99,11 +99,11 @@ func newRouter(s *Server) *gin.Engine {
+ }
+ 
+ func (s *Server) Run(traceCtx context.Context, wg *sync.WaitGroup) error {
+-	var err error
+-	_, s.Context().NfId, err = s.Consumer().RegisterNFInstance(context.Background())
++	_, registeredID, err := s.Consumer().RegisterNFInstance(context.Background())
+ 	if err != nil {
+ 		logger.InitLog.Errorf("AUSF register to NRF Error[%s]", err.Error())
+ 	}
++	s.Context().NfId = registeredNfID(s.Context().NfId, registeredID, err)
+ 
+ 	wg.Add(1)
+ 	go s.startServer(wg)
+@@ -111,6 +111,15 @@ func (s *Server) Run(traceCtx context.Context, wg *sync.WaitGroup) error {
+ 	return nil
+ }
+ 
++func registeredNfID(currentID, registeredID string, err error) string {
++	// NRF returns 200 without a Location on update. Keep the stable local ID
++	// instead of replacing it with the empty ID returned by that path.
++	if err != nil || registeredID == "" {
++		return currentID
++	}
++	return registeredID
++}
++
+ func (s *Server) Shutdown() {
+ 	s.shutdownHttpServer()
+ }

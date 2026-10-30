@@ -1,0 +1,43 @@
+{{- range $name, $slice := .Values.city.slices }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n6-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels: {cityverse.io/site: {{ $slice.site }}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: n6-{{ $name }}, cityverse.io/runtime: kubeadm, cityverse.io/role: upf}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: n6-{{ $name }}, cityverse.io/runtime: kubeadm, cityverse.io/role: upf, cityverse.io/site: {{ $slice.site }}}
+      annotations:
+        k8s.v1.cni.cncf.io/networks: {{ list (dict "name" (printf "n6-%s" $name) "interface" "n6" "ips" (list (printf "%s.20/24" $slice.n6Subnet))) | toJson | quote }}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {{ include "cityverse.selector" (list $ $slice.site) | nindent 8 }}
+      containers:
+        - name: n6-{{ $name }}
+          image: {{ $.Values.images.probe }}
+          command: [/bin/sh, -ec, "trap 'exit 0' TERM INT; while :; do sleep 1 & wait $!; done"]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: 100m, memory: 64Mi}}
+        {{- if $.Values.traffic.enabled }}
+        - name: traffic
+          image: {{ $.Values.images.traffic }}
+          command: [bash, -c, "trap 'exit 0' TERM INT; while :; do sleep 1 & wait $!; done"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1337
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {{ $.Values.traffic.resources | toYaml | nindent 12 }}
+          readinessProbe: {exec: {command: [iperf3, --version]}, periodSeconds: 10}
+          volumeMounts: [{name: traffic-tmp, mountPath: /tmp}]
+      volumes: [{name: traffic-tmp, emptyDir: {sizeLimit: 64Mi}}]
+        {{- end }}
+{{- end }}

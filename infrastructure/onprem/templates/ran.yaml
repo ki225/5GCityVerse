@@ -1,0 +1,78 @@
+{{- range $gnb := .Values.city.gnbs }}
+{{- $slice := index $.Values.city.slices $gnb.slice }}
+{{- $labels := dict "app.kubernetes.io/name" $gnb.workload "cityverse.io/runtime" "kubeadm" "cityverse.io/role" "ran" "cityverse.io/component" "gnb" "cityverse.io/slice" $gnb.slice }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $gnb.workload }}-config
+  namespace: {{ $.Release.Namespace }}
+data:
+  gnb.json: {{ include "cityverse.gnbConfig" (list $ $gnb) | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $gnb.workload }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    cityverse.io/site: {{ $gnb.id }}
+  annotations:
+    cityverse.io/map-object: {{ $gnb.id }}
+    cityverse.io/position-km: {{ $gnb.position | toJson | quote }}
+    cityverse.io/serving-site: {{ $slice.site }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {{ $labels | toYaml | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- $labels | toYaml | nindent 8 }}
+        cityverse.io/site: {{ $gnb.id }}
+      annotations:
+        cityverse.io/map-object: {{ $gnb.id }}
+        cityverse.io/position-km: {{ $gnb.position | toJson | quote }}
+        checksum/config: {{ include "cityverse.gnbConfig" (list $ $gnb) | sha256sum }}
+        k8s.v1.cni.cncf.io/networks: {{ list (dict "name" "n2" "interface" "n2" "ips" (list (printf "172.22.2.%d/24" (add 30 $gnb.networkIndex)))) (dict "name" (printf "n3-%s" $gnb.slice) "interface" "n3" "ips" (list (printf "%s.%d/24" $slice.n3Subnet (int $gnb.n3Host)))) | toJson | quote }}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {{ include "cityverse.ranSelector" (list $ $gnb) | nindent 8 }}
+      initContainers:
+        - name: wait-amf
+          image: {{ $.Values.images.curl }}
+          command: [/bin/sh, -ec]
+          args: [{{ printf "until curl -sS --connect-timeout 2 --max-time 3 -o /dev/null http://%s-free5gc-amf-service:8080/; do sleep 2; done" $.Release.Name | quote }}]
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: 100m, memory: 64Mi}}
+      containers:
+        - name: {{ $gnb.workload }}
+          image: {{ $.Values.images.gnb }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c, "exec ./free-ran-ue gnb -c /etc/cityverse/gnb.json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [NET_ADMIN]}
+          resources: {{ default $.Values.city.gnbResources $gnb.resources | toYaml | nindent 12 }}
+          readinessProbe:
+            tcpSocket: {port: 31413}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - {name: config, mountPath: /etc/cityverse, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: {{ $gnb.workload }}-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $gnb.workload }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  clusterIP: None
+  selector: {app.kubernetes.io/name: {{ $gnb.workload }}}
+  ports:
+    - {name: control, port: 31413, targetPort: 31413, protocol: TCP}
+    - {name: data, port: 31414, targetPort: 31414, protocol: UDP}
+{{- end }}

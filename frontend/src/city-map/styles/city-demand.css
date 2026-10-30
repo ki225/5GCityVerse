@@ -1,0 +1,11 @@
+.city-demand-tools { flex-wrap:wrap; }
+.city-demand-tools select { flex:1; }
+.city-demand-tools button { white-space:nowrap; }
+.city-demand-card form { display:grid; align-content:start; gap:10px; }
+.city-demand-card form > .city-infra-note { margin:0; }
+.city-demand-card { max-height:calc(100% - 16px) !important; bottom:8px; }
+.city-demand-card button:disabled { opacity:.5; cursor:default; }
+.city-placement-hint { padding:8px 18px; margin:0; color:var(--color-amber-800); font-size:11px; background:var(--color-red-100); }
+.city-placement-hint form { display:flex; flex-wrap:wrap; align-items:end; gap:8px; margin-top:8px; }
+.city-placement-hint label { display:flex; flex-direction:column; gap:4px; }
+.city-placement-hint input { width:70px; min-height:32px; border:1px solid var(--color-primary-200); border-radius:5px; padding:4px; }

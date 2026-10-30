@@ -1,0 +1,8 @@
+**
+!archive/
+!archive/legacy/
+!archive/legacy/evidence/
+!archive/legacy/evidence/capture_worker.py
+!archive/legacy/evidence/capture_contract.py
+!archive/legacy/policy/
+!archive/legacy/policy/policy_observer.py

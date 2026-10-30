@@ -1,0 +1,46 @@
+# Single-node placement example. Replace the hostname before rendering.
+city:
+  placement:
+    mode: colocated
+    nodeSelector:
+      kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+free5gc:
+  mongodb:
+    nodeSelector:
+      cityverse.io/site: null
+      kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+  free5gc-amf:
+    amf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+  free5gc-ausf:
+    ausf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+  free5gc-nrf:
+    nrf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+  free5gc-pcf:
+    pcf:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+  free5gc-udm:
+    udm:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+  free5gc-udr:
+    udr:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME
+  free5gc-webui:
+    webui:
+      nodeSelector:
+        cityverse.io/site: null
+        kubernetes.io/hostname: REPLACE_WITH_KUBERNETES_HOSTNAME

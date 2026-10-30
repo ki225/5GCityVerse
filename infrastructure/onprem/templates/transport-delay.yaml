@@ -1,0 +1,28 @@
+{{- if .Values.city.transportDelay.enabled }}
+{{- $endpoints := dict }}
+{{- range $gnb := .Values.city.gnbs }}
+{{- $slice := index $.Values.city.slices $gnb.slice }}
+{{- $site := index $.Values.city.sites $slice.site }}
+{{- $dx := subf (index $gnb.position 0) (index $site.position 0) }}
+{{- $dy := subf (index $gnb.position 1) (index $site.position 1) }}
+{{- if lt $dx 0.0 }}{{ $dx = mulf $dx -1 }}{{ end }}
+{{- if lt $dy 0.0 }}{{ $dy = mulf $dy -1 }}{{ end }}
+{{- $km := mulf (addf $dx $dy) $.Values.city.transportDelay.routeStretch }}
+{{- $us := int (ceil (addf (mulf $km $.Values.city.transportDelay.fibreUsPerKm) (index $.Values.city.transportDelay.processingUs $site.tier))) }}
+{{- $upf := printf "upf-%s" $gnb.slice }}
+{{- $upfIp := printf "%s.10" $slice.n3Subnet }}
+{{- $gnbIp := printf "%s.%d" $slice.n3Subnet (int $gnb.n3Host) }}
+{{- $meta := dict "site" $slice.site "tier" $site.tier "routeKm" $km "delayUs" $us }}
+{{- $_ := set $endpoints $gnb.workload (dict "interface" "n3" "peers" (list (merge (dict "ip" $upfIp) $meta))) }}
+{{- $existing := get $endpoints $upf | default (dict "interface" "n3" "peers" list) }}
+{{- $_ := set $existing "peers" (append $existing.peers (merge (dict "ip" $gnbIp) $meta)) }}
+{{- $_ := set $endpoints $upf $existing }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cityverse-transport-delay
+  namespace: {{ .Release.Namespace }}
+data:
+  n3-delay.json: {{ dict "schemaVersion" "cityverse.n3-delay/v1" "model" "Manhattan km * routeStretch * fibreUsPerKm + tier processingUs; each direction" "endpoints" $endpoints | toJson | quote }}
+{{- end }}

@@ -1,0 +1,37 @@
+{
+  "name": "5gcityverse-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run build && npm run start",
+    "start": "node server.mjs",
+    "build": "node ./node_modules/typescript/bin/tsc && node ./node_modules/vite/bin/vite.js build --mode production",
+    "preview": "npm run start",
+    "test": "npm run test:unit && npm run test:server",
+    "test:server": "node --test test/static-server.test.mjs",
+    "test:unit": "vitest run",
+    "test:e2e": "npm run build && playwright test"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sirv": "^3.0.2",
+    "zustand": "^4.5.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^6.0.3",
+    "autoprefixer": "^10.4.19",
+    "postcss": "8.5.32",
+    "tailwindcss": "^3.4.7",
+    "typescript": "^5.5.3",
+    "vite": "8.1.6",
+    "vitest": "4.1.12"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

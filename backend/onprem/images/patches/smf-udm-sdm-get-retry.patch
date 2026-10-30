@@ -1,0 +1,44 @@
+diff --git a/internal/sbi/consumer/udm_service.go b/internal/sbi/consumer/udm_service.go
+--- a/internal/sbi/consumer/udm_service.go
++++ b/internal/sbi/consumer/udm_service.go
+@@ -3,5 +3,7 @@ import (
+ 	"context"
+ 	"fmt"
++	"strings"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/pkg/errors"
+@@ -202,7 +204,20 @@ func (s *nudmService) GetSmData(ctx context.Context, supi string,
+ 
+ 	request.Supi = &supi
+ 
+-	rsp, err := client.SessionManagementSubscriptionDataRetrievalApi.GetSmData(ctx, request)
++	var rsp *SubscriberDataManagement.GetSmDataResponse
++	var err error
++	for attempt := 0; attempt < 3; attempt++ {
++		rsp, err = client.SessionManagementSubscriptionDataRetrievalApi.GetSmData(ctx, request)
++		if err == nil || !retryableSDMGetError(err) || attempt == 2 {
++			break
++		}
++		logger.ConsumerLog.Warnf("Transient UDM SDM GET transport failure; retry %d/2: %v", attempt+1, err)
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-time.After(time.Duration(50*(attempt+1)) * time.Millisecond):
++		}
++	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -211,4 +226,10 @@ func (s *nudmService) GetSmData(ctx context.Context, supi string,
+ 	return sessSubData, err
+ }
+ 
++// A failed HTTP/2 connection establishment has no HTTP response. Retrying
++// this idempotent SDM GET is safe; semantic UDM errors are not retried.
++func retryableSDMGetError(err error) bool {
++	return err != nil && strings.Contains(err.Error(), "http2: client conn could not be established")
++}
++
+ func (s *nudmService) Subscribe(ctx context.Context, smCtx *smf_context.SMContext, smPlmnID *models.PlmnIdNid) (

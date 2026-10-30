@@ -1,0 +1,75 @@
+{{- $slices := dict -}}
+{{- range $name, $slice := .Values.city.slices -}}
+{{- $_ := set $slices $name (dict "sst" $slice.sst "sd" $slice.sd) -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: nssf-config, namespace: {{ .Release.Namespace }}}
+data:
+  nssfcfg.yaml: |
+    info: {version: 1.0.2, description: City four-slice selection}
+    configuration:
+      nssfName: NSSF
+      supportedPlmnList: [{mcc: "208", mnc: "93"}]
+      serviceNameList: [nnssf-nsselection, nnssf-nssaiavailability]
+      sbi: {scheme: http, registerIPv4: nssf, bindingIPv4: 0.0.0.0, port: 8000}
+      nrfUri: http://nrf-nnrf:8000
+      supportedNssaiInPlmnList:
+        - plmnId: {mcc: "208", mnc: "93"}
+          supportedSnssaiList:
+          {{- range $slice := .Values.city.slices }}
+            - {sst: {{ $slice.sst }}, sd: {{ $slice.sd | quote }}}
+          {{- end }}
+      taList:
+        - tai: {plmnId: {mcc: "208", mnc: "93"}, tac: "000001"}
+          accessType: 3GPP_ACCESS
+          supportedSnssaiList:
+          {{- range $slice := .Values.city.slices }}
+            - {sst: {{ $slice.sst }}, sd: {{ $slice.sd | quote }}}
+          {{- end }}
+      nsiList:
+      {{- range $slice := .Values.city.slices }}
+        - snssai: {sst: {{ $slice.sst }}, sd: {{ $slice.sd | quote }}}
+          nsiInformationList:
+            - {nrfId: "http://nrf-nnrf:8000/nnrf-nfm/v1/nf-instances", nsiId: {{ $slice.sst | toString | quote }}}
+      {{- end }}
+      amfSetList: []
+      amfList: []
+    logger: {enable: true, level: info, reportCaller: false}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nssf
+  namespace: {{ .Release.Namespace }}
+  labels: {cityverse.io/site: {{ .Values.city.core.nssf.site }}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: nssf, cityverse.io/runtime: kubeadm, cityverse.io/role: core}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: nssf, cityverse.io/runtime: kubeadm, cityverse.io/role: core, cityverse.io/site: {{ .Values.city.core.nssf.site }}}
+      annotations:
+        checksum/config: {{ $slices | toJson | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {{ include "cityverse.selector" (list . .Values.city.core.nssf.site) | nindent 8 }}
+      containers:
+        - name: nssf
+          image: {{ .Values.images.nssf }}
+          command: [/free5gc/nssf, -c, /etc/cityverse/nssfcfg.yaml]
+          env: [{name: NSSF_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000006"}]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {{ .Values.city.core.nssf.resources | toYaml | nindent 12 }}
+          readinessProbe: {tcpSocket: {port: 8000}, periodSeconds: 5}
+          volumeMounts: [{name: config, mountPath: /etc/cityverse, readOnly: true}]
+      volumes: [{name: config, configMap: {name: nssf-config}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: nssf, namespace: {{ .Release.Namespace }}}
+spec:
+  selector: {app.kubernetes.io/name: nssf}
+  ports: [{name: sbi, port: 8000, targetPort: 8000}]

@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [resources.yaml]
+patches:
+  - path: amf-recreate.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      labelSelector: app.kubernetes.io/name=free5gc-amf
+  - target: {kind: Deployment, labelSelector: "app.kubernetes.io/name=free5gc-amf,nf=amf"}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: AMF_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000001"}
+  - target: {kind: Deployment, labelSelector: "app.kubernetes.io/name=free5gc-ausf,nf=ausf"}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: AUSF_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000002"}
+  - target: {kind: Deployment, labelSelector: "app.kubernetes.io/name=free5gc-udm,nf=udm"}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: UDM_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000003"}
+  - target: {kind: Deployment, labelSelector: "app.kubernetes.io/name=free5gc-udr,nf=udr"}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: UDR_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000004"}
+  - target: {kind: Deployment, labelSelector: "app.kubernetes.io/name=free5gc-pcf,nf=pcf"}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: PCF_NF_INSTANCE_ID, value: "23e12894-5c6a-4fb4-8bd0-010000000007"}

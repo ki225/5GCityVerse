@@ -1,0 +1,46 @@
+--- a/internal/sbi/consumer/smf_service.go
++++ b/internal/sbi/consumer/smf_service.go
+@@ -173,8 +173,10 @@
+ 	if err != nil {
+ 		return "", nil, nil, err
+ 	}
+-	postSmContextReponse, localErr := client.SMContextsCollectionApi.
+-		PostSmContexts(ctx, &postSmContextsRequest)
++	postSmContextReponse, localErr := postSmContextConnectRetry(ctx,
++        func() (*Nsmf_PDUSession.PostSmContextsResponse, error) {
++            return client.SMContextsCollectionApi.PostSmContexts(ctx, &postSmContextsRequest)
++        })
+ 	if localErr == nil {
+ 		location := postSmContextReponse.Location
+ 
+--- /dev/null
++++ b/internal/sbi/consumer/smf_connect_retry.go
+@@ -0,0 +1,28 @@
++package consumer
++
++import (
++ "context"
++ "errors"
++ "net/url"
++ "time"
++ Nsmf_PDUSession "github.com/free5gc/openapi/smf/PDUSession"
++)
++
++// x/net/http2 v0.47.0 returns this error before allocating the first stream
++// (nextStreamID == 1). No POST reached SMF. Every attempt rebuilds the SDK
++// request; EOF, timeouts, response failures and other outcomes are not replayed.
++func postSmContextConnectRetry(ctx context.Context, call func() (*Nsmf_PDUSession.PostSmContextsResponse,error)) (*Nsmf_PDUSession.PostSmContextsResponse,error) {
++ for attempt:=0; ;attempt++ {
++  if err:=ctx.Err();err!=nil {return nil,err}
++  response,err:=call()
++  var transport *url.Error
++  safe:=errors.As(err,&transport) && transport.Op=="Post" && transport.Err!=nil &&
++    transport.Err.Error()=="http2: client conn could not be established"
++  if err==nil || !safe || attempt>=2 {return response,err}
++  timer:=time.NewTimer(time.Duration(attempt+1)*50*time.Millisecond)
++  select {
++  case <-ctx.Done():timer.Stop();return nil,ctx.Err()
++  case <-timer.C:
++  }
++ }
++}

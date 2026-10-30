@@ -1,0 +1,171 @@
+--- a/src/utils/common.hpp
++++ b/src/utils/common.hpp
+@@ -28,6 +28,8 @@
+ OctetString IpToOctetString(const std::string &address);
+ std::string OctetStringToIp(const OctetString &address);
+ int64_t CurrentTimeMillis();
++// Relative protocol deadlines; independent of wall-clock/NTP adjustments.
++int64_t CurrentMonotonicMillis();
+ TimeStamp CurrentTimeStamp();
+ int NextId();
+ int ParseInt(const std::string &str);
+--- a/src/utils/common.cpp
++++ b/src/utils/common.cpp
+@@ -147,6 +147,12 @@
+     return res;
+ }
+ 
++int64_t utils::CurrentMonotonicMillis()
++{
++    return std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
+ int64_t utils::CurrentTimeMillis()
+ {
+     auto time = std::chrono::system_clock::now();
+--- a/src/utils/nts.cpp
++++ b/src/utils/nts.cpp
+@@ -22,7 +22,7 @@
+ void TimerBase::setTimerAbsolute(int timerId, int64_t timeMs)
+ {
+     auto *timerInfo = new TimerInfo();
+-    timerInfo->start = utils::CurrentTimeMillis();
++    timerInfo->start = utils::CurrentMonotonicMillis();
+     timerInfo->end = timeMs;
+     timerInfo->timerId = timerId;
+ 
+@@ -34,7 +34,7 @@
+     if (timerQueue.empty())
+         return WAIT_TIME_IF_NO_TIMER;
+ 
+-    auto delta = timerQueue.top()->end - utils::CurrentTimeMillis();
++    auto delta = timerQueue.top()->end - utils::CurrentMonotonicMillis();
+     return delta < 0 ? 0 : delta;
+ }
+ 
+@@ -44,7 +44,7 @@
+         return nullptr;
+ 
+     TimerInfo *timer = timerQueue.top();
+-    if (timer->end < utils::CurrentTimeMillis())
++    if (timer->end < utils::CurrentMonotonicMillis())
+     {
+         timerQueue.pop();
+         return timer;
+@@ -92,7 +92,7 @@
+ 
+ bool NtsTask::setTimer(int timerId, int64_t delayMs)
+ {
+-    return setTimerAbsolute(timerId, utils::CurrentTimeMillis() + delayMs);
++    return setTimerAbsolute(timerId, utils::CurrentMonotonicMillis() + delayMs);
+ }
+ 
+ bool NtsTask::setTimerAbsolute(int timerId, int64_t timeMs)
+--- a/src/utils/nts.hpp
++++ b/src/utils/nts.hpp
+@@ -103,6 +103,7 @@
+   public:
+     ~TimerBase();
+ 
++    // Absolute deadline in CurrentMonotonicMillis(), never Unix epoch.
+     void setTimerAbsolute(int timerId, int64_t timeMs);
+ 
+     TimerInfo *getAndRemoveExpiredTimer();
+@@ -132,6 +133,7 @@
+     bool push(std::unique_ptr<NtsMessage> &&msg);
+     bool pushFront(std::unique_ptr<NtsMessage> &&msg);
+     bool setTimer(int timerId, int64_t delayMs);
++    // Internal absolute deadline in CurrentMonotonicMillis().
+     bool setTimerAbsolute(int timerId, int64_t timeMs);
+ 
+   protected:
+--- a/src/ue/rls/udp_task.cpp
++++ b/src/ue/rls/udp_task.cpp
+@@ -44,7 +44,7 @@
+ 
+ void RlsUdpTask::onLoop()
+ {
+-    auto current = utils::CurrentTimeMillis();
++    auto current = utils::CurrentMonotonicMillis();
+     if (current - m_lastLoop > LOOP_PERIOD)
+     {
+         m_lastLoop = current;
+@@ -102,7 +102,7 @@
+             oldDbm = m_cells[msg->sti].dbm;
+ 
+         m_cells[msg->sti].address = addr;
+-        m_cells[msg->sti].lastSeen = utils::CurrentTimeMillis();
++        m_cells[msg->sti].lastSeen = utils::CurrentMonotonicMillis();
+ 
+         int newDbm = ((const rls::RlsHeartBeatAck &)*msg).dbm;
+         m_cells[msg->sti].dbm = newDbm;
+--- a/src/ue/rls/ctl_task.cpp
++++ b/src/ue/rls/ctl_task.cpp
+@@ -180,7 +180,7 @@
+         m_pduMap[pduId].id = pduId;
+         m_pduMap[pduId].pdu = data.copy();
+         m_pduMap[pduId].rrcChannel = channel;
+-        m_pduMap[pduId].sentTime = utils::CurrentTimeMillis();
++        m_pduMap[pduId].sentTime = utils::CurrentMonotonicMillis();
+     }
+ 
+     rls::RlsPduTransmission msg{m_shCtx->sti};
+@@ -205,7 +205,7 @@
+ 
+ void RlsControlTask::onAckControlTimerExpired()
+ {
+-    int64_t current = utils::CurrentTimeMillis();
++    int64_t current = utils::CurrentMonotonicMillis();
+ 
+     std::vector<uint32_t> transmissionFailureIds;
+     std::vector<rls::PduInfo> transmissionFailures;
+--- a/src/gnb/rls/udp_task.cpp
++++ b/src/gnb/rls/udp_task.cpp
+@@ -64,7 +64,7 @@
+ 
+ void RlsUdpTask::onLoop()
+ {
+-    auto current = utils::CurrentTimeMillis();
++    auto current = utils::CurrentMonotonicMillis();
+     if (current - m_lastLoop > LOOP_PERIOD)
+     {
+         m_lastLoop = current;
+@@ -105,7 +105,7 @@
+         {
+             int ueId = m_stiToUe[msg->sti];
+             m_ueMap[ueId].address = addr;
+-            m_ueMap[ueId].lastSeen = utils::CurrentTimeMillis();
++            m_ueMap[ueId].lastSeen = utils::CurrentMonotonicMillis();
+         }
+         else
+         {
+@@ -113,7 +113,7 @@
+ 
+             m_stiToUe[msg->sti] = ueId;
+             m_ueMap[ueId].address = addr;
+-            m_ueMap[ueId].lastSeen = utils::CurrentTimeMillis();
++            m_ueMap[ueId].lastSeen = utils::CurrentMonotonicMillis();
+ 
+             auto w = std::make_unique<NmGnbRlsToRls>(NmGnbRlsToRls::SIGNAL_DETECTED);
+             w->ueId = ueId;
+--- a/src/gnb/rls/ctl_task.cpp
++++ b/src/gnb/rls/ctl_task.cpp
+@@ -187,7 +187,7 @@
+         m_pduMap[pduId].id = pduId;
+         m_pduMap[pduId].pdu = data.copy();
+         m_pduMap[pduId].rrcChannel = channel;
+-        m_pduMap[pduId].sentTime = utils::CurrentTimeMillis();
++        m_pduMap[pduId].sentTime = utils::CurrentMonotonicMillis();
+     }
+ 
+     rls::RlsPduTransmission msg{m_sti};
+@@ -212,7 +212,7 @@
+ 
+ void RlsControlTask::onAckControlTimerExpired()
+ {
+-    int64_t current = utils::CurrentTimeMillis();
++    int64_t current = utils::CurrentMonotonicMillis();
+ 
+     std::vector<uint32_t> transmissionFailureIds;
+     std::vector<rls::PduInfo> transmissionFailures;

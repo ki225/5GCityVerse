@@ -1,0 +1,19 @@
+{
+  "schema": "cityverse.intent-configuration/v1",
+  "maximum_observation_age_seconds": 30,
+  "initial_observation_timeout_seconds": 300,
+  "maximum_protected_regression_percent": 5,
+  "authority": {
+    "priority_policy_ids": [],
+    "degradation_policy_ids": [],
+    "resource_budget_ids": [],
+    "allowed_metrics": []
+  },
+  "providers": {},
+  "budgets": {},
+  "targets": [],
+  "capacity_profiles": [],
+  "session_bindings": [],
+  "qos_telemetry_targets": {},
+  "nf_telemetry_targets": {}
+}

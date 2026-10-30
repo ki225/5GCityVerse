@@ -1,0 +1,50 @@
+--- a/src/iperf_api.c
++++ b/src/iperf_api.c
+@@ -2274,6 +2274,8 @@
+ iperf_init_test(struct iperf_test *test)
+ {
+     struct iperf_time now;
++    struct iperf_time wall_before, wall_after;
++    int wall_ok;
+     struct iperf_stream *sp;
+ 
+     if (test->protocol->init) {
+@@ -2282,14 +2284,38 @@
+     }
+ 
+     /* Init each stream. */
++    { struct timespec ts = {0};
++      wall_ok = clock_gettime(CLOCK_BOOTTIME, &ts) == 0;
++      wall_before.secs = ts.tv_sec; wall_before.usecs = ts.tv_nsec / 1000; }
+     if (iperf_time_now(&now) < 0) {
+ 	i_errno = IEINITTEST;
+ 	return -1;
+     }
++    { struct timespec ts = {0};
++      wall_ok = (clock_gettime(CLOCK_BOOTTIME, &ts) == 0) && wall_ok;
++      wall_after.secs = ts.tv_sec; wall_after.usecs = ts.tv_nsec / 1000; }
+     SLIST_FOREACH(sp, &test->streams, streams) {
+ 	sp->result->start_time = sp->result->start_time_fixed = now;
+     }
+ 
++    /* The ordinary JSON timestamp is connection time, before UDP setup.
++     * Bracket the exact local accounting origin in stable kernel boot time.
++     * Keep monotonic timers, data sockets and counters. Restrict this extra
++     * evidence to the single-stream, non-omitted UDP profile we consume.
++     */
++    if (wall_ok && test->json_output && test->json_start &&
++        test->protocol->id == Pudp && test->num_streams == 1 &&
++        !test->bidirectional && test->omit == 0) {
++        cJSON *clock = cJSON_CreateObject();
++        if (clock) {
++            cJSON_AddStringToObject(clock, "schema", "cityverse.iperf-accounting/v2");
++            cJSON_AddStringToObject(clock, "clock", "CLOCK_BOOTTIME");
++            cJSON_AddNumberToObject(clock, "before_usec", (double)iperf_time_in_usecs(&wall_before));
++            cJSON_AddNumberToObject(clock, "after_usec", (double)iperf_time_in_usecs(&wall_after));
++            cJSON_AddItemToObject(test->json_start, "accounting_timestamp", clock);
++        }
++    }
++
+     if (test->on_test_start)
+         test->on_test_start(test);
+ 

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "cityverse.qos-objectives/v1",
+  "revision": "replace-with-your-objective-revision",
+  "source": "operator-defined-example-not-enabled",
+  "objectives": [
+    {
+      "scenario": "video_streaming",
+      "slice": "embb",
+      "scope": "scenario-total",
+      "throughputStatistic": "sum",
+      "rttStatistic": "mean",
+      "lossStatistic": "packet-ratio",
+      "minUplinkMbps": null,
+      "minDownlinkMbps": null,
+      "maxRttMs": null,
+      "maxLossPercent": null
+    }
+  ]
+}

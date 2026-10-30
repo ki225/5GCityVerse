@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "cityverse.service-profile-catalog/v1",
+  "revision": 1,
+  "profiles": [
+    {"id":"web_browsing","name":"日常上網","slice":"embb","description":"傳訊息、瀏覽網頁、查地圖","trafficModel":"constant-udp","offeredUplinkMbpsPerUe":0.1,"offeredDownlinkMbpsPerUe":1},
+    {"id":"video_streaming","name":"觀看影音","slice":"embb","description":"看影片、短影音、直播","trafficModel":"constant-udp","offeredUplinkMbpsPerUe":0.2,"offeredDownlinkMbpsPerUe":4},
+    {"id":"realtime_control","name":"即時設備控制","slice":"urllc","description":"機械手臂、倉儲搬運設備控制","trafficModel":"constant-udp","offeredUplinkMbpsPerUe":0.2,"offeredDownlinkMbpsPerUe":0.2},
+    {"id":"connected_traffic","name":"聯網交通","slice":"v2x","description":"車輛與路口交換位置、通行資訊","trafficModel":"constant-udp","offeredUplinkMbpsPerUe":0.1,"offeredDownlinkMbpsPerUe":0.1},
+    {"id":"factory_iot","name":"工廠 IoT","slice":"mmtc","description":"溫度、震動、電表與設備狀態回報","trafficModel":"constant-udp","offeredUplinkMbpsPerUe":0.01,"offeredDownlinkMbpsPerUe":0.001}
+  ]
+}

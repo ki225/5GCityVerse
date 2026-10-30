@@ -1,0 +1,41 @@
+{
+  "sourceRepository": "https://github.com/free5gc/pcf.git",
+  "sourceCommit": "df6c0daacbc7fe5f610f19665e169f013eb05721",
+  "patchSha256": "7fae0b8b6d8d38bb80452af03146bd4875ea5ce501196b3d17198018ea213fdf",
+  "patchedFileLineEndings": "lf-except-internal/context/context.go-crlf",
+  "patchedPaths": [
+    "Dockerfile.boot-receipt",
+    "Dockerfile.boot-receipt.dockerignore",
+    "Dockerfile.recovery-quarantine",
+    "Dockerfile.recovery-quarantine.dockerignore",
+    "internal/context/boot_receipt.go",
+    "internal/context/boot_receipt_test.go",
+    "internal/context/context.go",
+    "internal/context/recovery_quarantine.go",
+    "internal/context/recovery_quarantine_test.go",
+    "internal/sbi/api_oam.go",
+    "internal/sbi/pcf_oam_cors_regression_test.go",
+    "internal/sbi/recovery_quarantine_test.go",
+    "internal/sbi/server.go",
+    "pkg/service/init.go",
+    "pkg/service/recovery_quarantine_test.go"
+  ],
+  "builderImage": "golang:1.25.5@sha256:22bd1c41c958c762e9633f07a5fee8266300e5f25e18e269a6d87a4b870368aa",
+  "runtimeImage": "free5gc/pcf:v4.2.2@sha256:b6208c82a02917cb6d620336d1245c00d875254e2c9bd28416c2e250a43453a4",
+  "expectedBinarySha256": "47e72bbda1c3312537162deb42a08337a047da113412bd80981ce1e14c899299",
+  "baseV3ArchiveSha256": "f55ae9af96448b7f08a2261e41f619eb51716f13a54cdc909bb1c64a0df0c9fe",
+  "reviewCandidateManifestSha256": "88a07a99ee88e5ed5f7830f4e4e605787acc67a8ca08f6d695e04153828163c2",
+  "reviewCandidateConfigSha256": "56049cd076123a57342a6351ba0927cfa43f2ee2e4ebcbe3589e4de0c0aa24b5",
+  "reviewCandidateArchiveSha256": "5fb64251a09e8565747a3ed7c8a559bf7343aa7e3629141a1e82f57bd1d6fffc",
+  "baseLayerDigests": [
+    "sha256:d078792c4f9122259f14b539315bd92cbd9490ed73e08255a08689122b143108",
+    "sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+    "sha256:1638c0243f82bda5cf4d8c5173a46420bfc6c0eb68cec840f0cbdde1b7d9ac30",
+    "sha256:20b75d2e44c2a20576d6fd19e9397406ebc59a1a48d7ee654f4d759b0346765f",
+    "sha256:f1499ad86aed5ea87606b33664f34ed5afa6fbf9f8c629ea4758e1f5ed5631db",
+    "sha256:b5681afc43a0c9df682e629c975fba794430aaa46d00230c707a4d4bba75ae94",
+    "sha256:eaa2f411c04974fd23325ba015becd75e11eeb237c3ba22526b2faee94d94bb7",
+    "sha256:3dea34f4fcfc34c2938d11115b5bb1535d102a0fc073c30cb2ef7663ad5e31da"
+  ],
+  "scope": "opt-in current four-pool PCF quarantine; previous epoch, AMF subscriptions and downstream policy remain unknown"
+}

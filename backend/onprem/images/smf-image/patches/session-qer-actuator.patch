@@ -1,0 +1,2960 @@
+diff --git a/internal/context/intent_control.go b/internal/context/intent_control.go
+new file mode 100644
+index 0000000..b9c4eeb
+--- /dev/null
++++ b/internal/context/intent_control.go
+@@ -0,0 +1,405 @@
++package context
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++	"regexp"
++	"sort"
++	"sync"
++	"time"
++
++	"github.com/free5gc/smf/pkg/factory"
++	"github.com/google/uuid"
++)
++
++var IntentControlMu sync.Mutex
++var IntentBootEpoch = uuid.NewString()
++
++// ErrIntentAdmissionAbsent is produced only for a missing record in an existing, verified store.
++var ErrIntentAdmissionAbsent = errors.New("intent admission record absent")
++var intentNonce = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
++
++type IntentUPFState struct {
++	Target    string `json:"target_id"`
++	Owner     string `json:"owner_id"`
++	Operation string `json:"operation_id"`
++	Accepting bool   `json:"accepting"`
++	Managed   bool   `json:"managed"`
++	Removed   bool   `json:"removed"`
++	Revision  uint64 `json:"revision"`
++}
++
++func IntentUPFRegistrationOwnerAllowed(state IntentUPFState, owner, expected string) bool {
++	return state.Owner == "" || state.Owner == owner ||
++		(state.Managed && state.Removed && !state.Accepting && expected == IntentUPFVersion(state, ""))
++}
++
++type IntentAdmission struct {
++	Scope               string                `json:"network_scope"`
++	SUPI                string                `json:"supi"`
++	SessionID           int32                 `json:"pdu_session_id"`
++	Nonce               string                `json:"nonce"`
++	Owner               string                `json:"owner_id"`
++	Operation           string                `json:"operation_id"`
++	TargetUPF           string                `json:"target_upf_id"`
++	ValidFrom           float64               `json:"valid_from"`
++	ValidUntil          float64               `json:"valid_until"`
++	RegisteredAt        float64               `json:"registered_at"`
++	BootEpoch           string                `json:"boot_epoch"`
++	Status              string                `json:"status"`
++	Revision            uint64                `json:"revision"`
++	InstallationVersion string                `json:"installation_version"`
++	Binding             *IntentSessionBinding `json:"binding,omitempty"`
++}
++type IntentSessionBinding struct {
++	Ref                 string  `json:"smContextRef"`
++	Epoch               string  `json:"establishedEpoch"`
++	Key                 string  `json:"session_key"`
++	CreatedAt           float64 `json:"created_at"`
++	UPFID               string  `json:"upf_id"`
++	NodeIP              string  `json:"upf_node_ip"`
++	InstallationVersion string  `json:"installation_version"`
++}
++
++func IntentDigest(value interface{}) string {
++	raw, _ := json.Marshal(value)
++	hash := sha256.Sum256(raw)
++	return hex.EncodeToString(hash[:])
++}
++func IntentStateDir() (string, error) {
++	root := os.Getenv("SMF_SESSION_QER_STATE_DIR")
++	if !filepath.IsAbs(root) {
++		return "", errors.New("persistent intent state not configured")
++	}
++	root = filepath.Join(root, "selection")
++	if err := os.MkdirAll(root, 0700); err != nil {
++		return "", err
++	}
++	s, err := os.Lstat(root)
++	if err != nil || !s.IsDir() || s.Mode()&os.ModeSymlink != 0 || s.Mode().Perm()&0077 != 0 {
++		return "", errors.New("invalid intent state directory")
++	}
++	return root, nil
++}
++func intentRead(kind, key string, value interface{}) error {
++	dir, err := IntentStateDir()
++	if err != nil {
++		return err
++	}
++	p := filepath.Join(dir, kind+"-"+IntentDigest(key)+".json")
++	s, err := os.Lstat(p)
++	if err != nil {
++		return err
++	}
++	if !s.Mode().IsRegular() || s.Size() > 32768 {
++		return errors.New("invalid intent record")
++	}
++	raw, err := os.ReadFile(p)
++	if err != nil {
++		return err
++	}
++	return json.Unmarshal(raw, value)
++}
++func intentSave(kind, key string, value interface{}) error {
++	dir, err := IntentStateDir()
++	if err != nil {
++		return err
++	}
++	raw, err := json.Marshal(value)
++	if err != nil || len(raw) > 32768 {
++		return errors.New("intent record exceeds bound")
++	}
++	f, err := os.CreateTemp(dir, ".intent-")
++	if err != nil {
++		return err
++	}
++	name := f.Name()
++	defer os.Remove(name)
++	if err = f.Chmod(0600); err == nil {
++		_, err = f.Write(raw)
++	}
++	if err == nil {
++		err = f.Sync()
++	}
++	closeErr := f.Close()
++	if err == nil {
++		err = closeErr
++	}
++	if err != nil {
++		return err
++	}
++	if err = os.Rename(name, filepath.Join(dir, kind+"-"+IntentDigest(key)+".json")); err != nil {
++		return err
++	}
++	d, err := os.Open(dir)
++	if err != nil {
++		return err
++	}
++	defer d.Close()
++	return d.Sync()
++}
++func IntentUPFStateLocked(target string) (IntentUPFState, error) {
++	s := IntentUPFState{Target: target, Accepting: true}
++	err := intentRead("upf", target, &s)
++	if os.IsNotExist(err) {
++		return s, nil
++	}
++	if err != nil || s.Target != target {
++		return s, errors.New("UPF intent state invalid")
++	}
++	return s, nil
++}
++func IntentSaveUPFStateLocked(s IntentUPFState) error { return intentSave("upf", s.Target, s) }
++func IntentUPFVersion(s IntentUPFState, upfID string) string {
++	return IntentDigest(struct {
++		State IntentUPFState
++		UPFID string
++		Boot  string
++	}{s, upfID, IntentBootEpoch})
++}
++func admissionIdentity(scope, supi string, id int32) string {
++	return fmt.Sprintf("%s|%s|%d", scope, supi, id)
++}
++func IntentAdmissionVersion(a IntentAdmission) string {
++	a.InstallationVersion = ""
++	return IntentDigest(a)
++}
++func IntentLoadAdmissionLocked(nonce string) (IntentAdmission, error) {
++	a := IntentAdmission{}
++	if !intentNonce.MatchString(nonce) {
++		return a, errors.New("invalid admission nonce")
++	}
++	// GET must not create a missing store or confuse storage failure with absence.
++	root := os.Getenv("SMF_SESSION_QER_STATE_DIR")
++	if !filepath.IsAbs(root) {
++		return a, errors.New("persistent intent state not configured")
++	}
++	parent, err := os.Lstat(root)
++	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm()&0500 != 0500 {
++		return a, errors.New("intent state root unavailable")
++	}
++	dir := filepath.Join(root, "selection")
++	before, err := os.Lstat(dir)
++	if err != nil || !before.IsDir() || before.Mode()&os.ModeSymlink != 0 || before.Mode().Perm() != 0700 {
++		return a, errors.New("intent selection store unavailable")
++	}
++	path := filepath.Join(dir, "admission-"+IntentDigest(nonce)+".json")
++	file, err := os.Lstat(path)
++	if os.IsNotExist(err) {
++		after, statErr := os.Lstat(dir)
++		if statErr == nil && after.IsDir() && after.Mode().Perm() == 0700 && os.SameFile(before, after) {
++			return a, ErrIntentAdmissionAbsent
++		}
++		return a, errors.New("intent selection store changed")
++	}
++	if err != nil {
++		return a, err
++	}
++	if !file.Mode().IsRegular() || file.Size() > 32768 || file.Mode().Perm()&0400 == 0 {
++		return a, errors.New("invalid intent admission record")
++	}
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		return a, err
++	}
++	err = json.Unmarshal(raw, &a)
++	if err != nil {
++		return a, err
++	}
++	if a.Nonce != nonce {
++		return a, errors.New("admission not found")
++	}
++	return a, nil
++}
++func IntentSaveAdmissionLocked(a IntentAdmission) error { return intentSave("admission", a.Nonce, a) }
++func IntentRegisterAdmissionLocked(a IntentAdmission, expected string) (IntentAdmission, error) {
++	if a.Scope == "" || a.Scope != os.Getenv("SMF_SESSION_QER_NETWORK_SCOPE") || !intentNonce.MatchString(a.Nonce) || a.SUPI == "" || a.SessionID < 1 || a.SessionID > 15 || a.Owner == "" || a.Operation == "" || a.TargetUPF == "" {
++		return a, errors.New("invalid admission identity")
++	}
++	now := float64(time.Now().UnixNano()) / 1e9
++	if !(a.ValidFrom <= now && now < a.ValidUntil && a.ValidUntil-now <= 3600) {
++		return a, errors.New("admission validity outside one hour")
++	}
++	if existing := GetSMContextById(a.SUPI, a.SessionID); existing != nil {
++		return a, errors.New("existing PDU session cannot be migrated by admission")
++	}
++	if _, err := IntentStateDir(); err != nil {
++		return a, err
++	}
++	current, err := IntentLoadAdmissionLocked(a.Nonce)
++	if err == nil {
++		if (expected != "absent" && expected != IntentAdmissionVersion(current)) || current.Owner != a.Owner || current.Operation != a.Operation || current.Status != "registered" || current.Scope != a.Scope || current.SUPI != a.SUPI || current.SessionID != a.SessionID || current.TargetUPF != a.TargetUPF || current.ValidFrom != a.ValidFrom || current.ValidUntil != a.ValidUntil {
++			return a, errors.New("admission owner or version conflict")
++		}
++		return current, nil
++	} else if !errors.Is(err, ErrIntentAdmissionAbsent) || expected != "absent" {
++		return a, errors.New("admission version conflict")
++	}
++	var previous string
++	index := admissionIdentity(a.Scope, a.SUPI, a.SessionID)
++	indexErr := intentRead("admission-index", index, &previous)
++	if indexErr != nil && !os.IsNotExist(indexErr) {
++		return a, indexErr
++	}
++	if indexErr == nil && previous != a.Nonce {
++		old, readErr := IntentLoadAdmissionLocked(previous)
++		if readErr != nil || (old.Status != "cancelled" && now < old.ValidUntil) {
++			return a, errors.New("another admission owns this future session")
++		}
++	}
++	a.RegisteredAt = now
++	a.BootEpoch = IntentBootEpoch
++	a.Status = "registered"
++	a.Revision = current.Revision + 1
++	a.Binding = nil
++	a.InstallationVersion = IntentAdmissionVersion(a)
++	if err := IntentSaveAdmissionLocked(a); err != nil {
++		return a, err
++	}
++	if err := intentSave("admission-index", index, a.Nonce); err != nil {
++		return a, err
++	}
++	return a, nil
++}
++
++func ValidateIntentUPFTemplate(upi *UserPlaneInformation, node *factory.UPNode, links []string) error {
++	if node == nil || node.Type != "UPF" || net.ParseIP(node.NodeID) == nil || (node.Addr != "" && net.ParseIP(node.Addr) == nil) || len(node.SNssaiInfos) == 0 || len(links) == 0 {
++		return errors.New("invalid pinned UPF template")
++	}
++	for _, name := range links {
++		if upi.AccessNetwork[name] == nil {
++			return errors.New("UPF link must reference an existing access network")
++		}
++	}
++	nets := []*net.IPNet{}
++	for _, up := range upi.UPFs {
++		for _, slice := range up.UPF.SNssaiInfos {
++			for _, dnn := range slice.DnnList {
++				for _, pool := range dnn.UeIPPools {
++					nets = append(nets, pool.ueSubNet)
++				}
++			}
++		}
++	}
++	for _, slice := range node.SNssaiInfos {
++		if slice == nil || slice.SNssai == nil || len(slice.DnnUpfInfoList) == 0 {
++			return errors.New("incomplete pinned slice capabilities")
++		}
++		for _, dnn := range slice.DnnUpfInfoList {
++			if dnn == nil || len(dnn.Pools) == 0 || len(dnn.StaticPools) != 0 {
++				return errors.New("dynamic UPF requires explicit dynamic-only address pools")
++			}
++			for _, pool := range dnn.Pools {
++				if pool == nil {
++					return errors.New("missing address pool")
++				}
++				_, network, err := net.ParseCIDR(pool.Cidr)
++				if err != nil || network.IP.To4() == nil {
++					return errors.New("valid IPv4 pool required")
++				}
++				ones, bits := network.Mask.Size()
++				if bits != 32 || ones > 30 {
++					return errors.New("address pool too small")
++				}
++				for _, old := range nets {
++					if old.Contains(network.IP) || network.Contains(old.IP) {
++						return errors.New("new UPF address pool overlaps existing capacity")
++					}
++				}
++				nets = append(nets, network)
++			}
++		}
++		if valid, err := slice.Validate(); err != nil || !valid {
++			return errors.New("invalid pinned slice capabilities")
++		}
++	}
++	return nil
++}
++
++// Caller already holds UserPlaneInformation.Mu and the creating session's SMLock.
++func BeginIntentUPFSelection(sm *SMContext, candidates []*UPNode) ([]*UPNode, func(*UPNode) error, func(), error) {
++	if os.Getenv("SMF_SESSION_QER_STATE_DIR") == "" {
++		return candidates, func(*UPNode) error { return nil }, func() {}, nil
++	}
++	IntentControlMu.Lock()
++	release := func() { IntentControlMu.Unlock() }
++	var admission *IntentAdmission
++	if sm != nil {
++		var nonce string
++		err := intentRead("admission-index", admissionIdentity(os.Getenv("SMF_SESSION_QER_NETWORK_SCOPE"), sm.Supi, sm.PDUSessionID), &nonce)
++		if err == nil {
++			a, e := IntentLoadAdmissionLocked(nonce)
++			if e != nil {
++				release()
++				return nil, nil, nil, e
++			}
++			now := float64(time.Now().UnixNano()) / 1e9
++			if a.Status != "cancelled" && now < a.ValidUntil {
++				if a.BootEpoch != IntentBootEpoch || now < a.ValidFrom || sm.IntentCreatedAt < a.RegisteredAt || a.Binding != nil {
++					release()
++					return nil, nil, nil, errors.New("admission creation fence changed")
++				}
++				admission = &a
++			}
++		} else if !os.IsNotExist(err) {
++			release()
++			return nil, nil, nil, err
++		}
++	}
++	selected := make([]*UPNode, 0)
++	for _, node := range candidates {
++		state, err := IntentUPFStateLocked(node.Name)
++		if err != nil {
++			release()
++			return nil, nil, nil, err
++		}
++		if state.Accepting && (admission == nil || node.UPF.UUID() == admission.TargetUPF) {
++			selected = append(selected, node)
++		}
++	}
++	if admission != nil && len(selected) != 1 {
++		release()
++		return nil, nil, nil, errors.New("admitted UPF is not an eligible accepting candidate")
++	}
++	bind := func(node *UPNode) error {
++		if admission == nil {
++			return nil
++		}
++		a := *admission
++		a.Binding = &IntentSessionBinding{Ref: sm.Ref, Epoch: sm.Ref, CreatedAt: sm.IntentCreatedAt, UPFID: node.UPF.UUID(), NodeIP: node.NodeID.ResolveNodeIdToIp().String(), InstallationVersion: a.InstallationVersion}
++		raw, _ := json.Marshal([]interface{}{a.Scope, sm.Supi, sm.PDUSessionID, sm.Ref})
++		a.Binding.Key = string(raw)
++		a.Status = "selected"
++		a.Revision++
++		return IntentSaveAdmissionLocked(a)
++	}
++	return selected, bind, release, nil
++}
++
++func IntentUPFSessions(node *UPNode) ([]string, []string, []string) {
++	active, inflight, seids := []string{}, []string{}, []string{}
++	for _, sm := range SMContextSnapshot() {
++		sm.SMLock.Lock()
++		ctx := sm.PFCPContext[node.NodeID.ResolveNodeIdToIp().String()]
++		selected := sm.SelectedUPF == node
++		raw, _ := json.Marshal([]interface{}{os.Getenv("SMF_SESSION_QER_NETWORK_SCOPE"), sm.Supi, sm.PDUSessionID, sm.Ref})
++		key := string(raw)
++		if ctx != nil && ctx.RemoteSEID != 0 {
++			active = append(active, key)
++			seids = append(seids, fmt.Sprint(ctx.RemoteSEID))
++		} else if selected || ctx != nil {
++			inflight = append(inflight, key)
++		}
++		sm.SMLock.Unlock()
++	}
++	sort.Strings(active)
++	sort.Strings(inflight)
++	sort.Strings(seids)
++	return active, seids, inflight
++}
+diff --git a/internal/context/intent_control_test.go b/internal/context/intent_control_test.go
+new file mode 100644
+index 0000000..55a1eae
+--- /dev/null
++++ b/internal/context/intent_control_test.go
+@@ -0,0 +1,146 @@
++package context
++
++import (
++	"net"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/pfcp/pfcpType"
++)
++
++func TestIntentRemovedUPFTargetCanBeReclaimedOnlyWithFreshTombstoneCAS(t *testing.T) {
++	state := IntentUPFState{Target: "reusable", Owner: "old-owner", Operation: "old-op", Managed: true, Removed: true, Revision: 3}
++	fresh := IntentUPFVersion(state, "")
++	if !IntentUPFRegistrationOwnerAllowed(state, "next-owner", fresh) {
++		t.Fatal("clean removed target cannot be reused")
++	}
++	if IntentUPFRegistrationOwnerAllowed(state, "next-owner", "absent") {
++		t.Fatal("old tombstone overwritten without fresh CAS")
++	}
++	state.Removed = false
++	if IntentUPFRegistrationOwnerAllowed(state, "next-owner", IntentUPFVersion(state, "")) {
++		t.Fatal("unresolved ownership transferred")
++	}
++	state.Removed = true
++	state.Accepting = true
++	if IntentUPFRegistrationOwnerAllowed(state, "next-owner", IntentUPFVersion(state, "")) {
++		t.Fatal("accepting target ownership transferred")
++	}
++}
++
++func intentFixture(t *testing.T) (*UPNode, *UPNode, IntentAdmission) {
++	t.Helper()
++	dir := t.TempDir()
++	if err := os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("SMF_SESSION_QER_STATE_DIR", dir)
++	t.Setenv("SMF_SESSION_QER_NETWORK_SCOPE", "city")
++	nodes := []*UPNode{}
++	for _, ip := range []string{"198.18.1.10", "198.18.1.11"} {
++		id := pfcpType.NodeID{NodeIdType: pfcpType.NodeIdTypeIpv4Address, IP: net.ParseIP(ip).To4()}
++		nodes = append(nodes, &UPNode{Name: ip, NodeID: id, Type: UPNODE_UPF, UPF: NewUPF(&id, nil)})
++	}
++	now := float64(time.Now().UnixNano()) / 1e9
++	a := IntentAdmission{Scope: "city", SUPI: "imsi-001010000000007", SessionID: 1, Nonce: "nonce-1", Owner: "intent-owner", Operation: "operation", TargetUPF: nodes[0].UPF.UUID(), ValidFrom: now - 1, ValidUntil: now + 60}
++	return nodes[0], nodes[1], a
++}
++
++func TestIntentAdmissionExactNewSessionAndNoFallback(t *testing.T) {
++	first, other, a := intentFixture(t)
++	IntentControlMu.Lock()
++	saved, err := IntentRegisterAdmissionLocked(a, "absent")
++	IntentControlMu.Unlock()
++	if err != nil {
++		t.Fatal(err)
++	}
++	sm := &SMContext{Ref: "new-native-ref", PDUSessionID: 1, SmfPduSessionSmContextCreateData: &models.SmfPduSessionSmContextCreateData{Supi: a.SUPI}, IntentCreatedAt: float64(time.Now().UnixNano()) / 1e9}
++	filtered, bind, release, err := BeginIntentUPFSelection(sm, []*UPNode{other, first})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(filtered) != 1 || filtered[0] != first {
++		release()
++		t.Fatal("wrong UPF selected")
++	}
++	if err = bind(first); err != nil {
++		release()
++		t.Fatal(err)
++	}
++	release()
++	IntentControlMu.Lock()
++	current, err := IntentLoadAdmissionLocked(a.Nonce)
++	IntentControlMu.Unlock()
++	if err != nil || current.Status != "selected" || current.Binding.Ref != sm.Ref || current.Binding.UPFID != a.TargetUPF || current.InstallationVersion != saved.InstallationVersion {
++		t.Fatal("native creation identity not recorded")
++	}
++	sm.Ref = "another-ref"
++	if _, _, _, err = BeginIntentUPFSelection(sm, []*UPNode{first, other}); err == nil {
++		t.Fatal("consumed admission was reused")
++	}
++}
++
++func TestIntentAdmissionsRejectOverlapButAllowSameUEOtherPDU(t *testing.T) {
++	_, _, a := intentFixture(t)
++	IntentControlMu.Lock()
++	defer IntentControlMu.Unlock()
++	saved, err := IntentRegisterAdmissionLocked(a, "absent")
++	if err != nil {
++		t.Fatal(err)
++	}
++	again, err := IntentRegisterAdmissionLocked(a, "absent")
++	if err != nil || again.InstallationVersion != saved.InstallationVersion {
++		t.Fatal("exact retry was not idempotent")
++	}
++	a.Nonce = "nonce-2"
++	if _, err = IntentRegisterAdmissionLocked(a, "absent"); err == nil {
++		t.Fatal("overlapping admission accepted")
++	}
++	a.SessionID = 2
++	if _, err = IntentRegisterAdmissionLocked(a, "absent"); err != nil {
++		t.Fatal("same UE different PDU rejected", err)
++	}
++}
++
++func TestIntentDrainingTargetIsExcludedAndOldCreationRejected(t *testing.T) {
++	first, other, a := intentFixture(t)
++	IntentControlMu.Lock()
++	_, err := IntentRegisterAdmissionLocked(a, "absent")
++	if err == nil {
++		err = IntentSaveUPFStateLocked(IntentUPFState{Target: first.Name, Owner: a.Owner, Operation: a.Operation, Accepting: false, Managed: true, Revision: 1})
++	}
++	IntentControlMu.Unlock()
++	if err != nil {
++		t.Fatal(err)
++	}
++	sm := &SMContext{Ref: "new-native-ref", PDUSessionID: 1, SmfPduSessionSmContextCreateData: &models.SmfPduSessionSmContextCreateData{Supi: a.SUPI}, IntentCreatedAt: float64(time.Now().UnixNano()) / 1e9}
++	if _, _, _, err = BeginIntentUPFSelection(sm, []*UPNode{first, other}); err == nil {
++		t.Fatal("draining target fell back to another UPF")
++	}
++	sm.PDUSessionID = 2
++	selected, _, release, err := BeginIntentUPFSelection(sm, []*UPNode{first, other})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer release()
++	if len(selected) != 1 || selected[0] != other {
++		t.Fatal("draining target admitted ordinary traffic")
++	}
++}
++
++func TestIntentAdmissionExpiredAndFutureValidityRejected(t *testing.T) {
++	_, _, a := intentFixture(t)
++	IntentControlMu.Lock()
++	defer IntentControlMu.Unlock()
++	a.ValidUntil = a.ValidFrom - 1
++	if _, err := IntentRegisterAdmissionLocked(a, "absent"); err == nil {
++		t.Fatal("expired admission accepted")
++	}
++	a.ValidUntil = a.ValidFrom + 60
++	a.ValidFrom = a.ValidUntil - 1
++	if _, err := IntentRegisterAdmissionLocked(a, "absent"); err == nil {
++		t.Fatal("future admission accepted")
++	}
++}
+diff --git a/internal/context/sm_context.go b/internal/context/sm_context.go
+index a9debc7..decaf60 100644
+--- a/internal/context/sm_context.go
++++ b/internal/context/sm_context.go
+@@ -23,9 +23,11 @@ import (
+ )
+ 
+ var (
+-	smContextPool    sync.Map
+-	canonicalRef     sync.Map
+-	seidSMContextMap sync.Map
++	smContextPool        sync.Map
++	canonicalRef         sync.Map
++	seidSMContextMap     sync.Map
++	intentCensusMu       sync.RWMutex
++	intentCensusRevision uint64
+ )
+ 
+ type DLForwardingType int
+@@ -112,7 +114,8 @@ var TeidGenerator *idgenerator.IDGenerator
+ type SMContext struct {
+ 	*models.SmfPduSessionSmContextCreateData
+ 
+-	Ref string
++	Ref             string
++	IntentCreatedAt float64
+ 
+ 	LocalSEID  uint64
+ 	RemoteSEID uint64
+@@ -280,6 +283,7 @@ func NewSMContext(id string, pduSessID int32) *SMContext {
+ 	smContext := new(SMContext)
+ 	// Create Ref and identifier
+ 	smContext.Ref = uuid.New().URN()
++	smContext.IntentCreatedAt = float64(time.Now().UnixNano()) / 1e9
+ 
+ 	smContext.Log = logger.PduSessLog.WithFields(logrus.Fields{
+ 		logger.FieldSupi:         id,
+@@ -366,9 +370,11 @@ func NewSMContext(id string, pduSessID int32) *SMContext {
+ 	}
+ 
+ 	smContext.NrdcIndicator = false
+-
+-	storeSMContext(smContext)
++	intentCensusMu.Lock()
++	smContextPool.Store(smContext.Ref, smContext)
+ 	canonicalRef.Store(canonicalName(id, pduSessID), smContext.Ref)
++	intentCensusRevision++
++	intentCensusMu.Unlock()
+ 
+ 	return smContext
+ }
+@@ -382,6 +388,21 @@ func GetSMContextByRef(ref string) *SMContext {
+ 	return smCtx
+ }
+ 
++func SMContextSnapshot() []*SMContext {
++	contexts := make([]*SMContext, 0)
++	smContextPool.Range(func(_, value interface{}) bool {
++		contexts = append(contexts, value.(*SMContext))
++		return true
++	})
++	return contexts
++}
++
++func IntentSessionCensusRevision() uint64 {
++	intentCensusMu.RLock()
++	defer intentCensusMu.RUnlock()
++	return intentCensusRevision
++}
++
+ func GetSMContextById(id string, pduSessID int32) *SMContext {
+ 	var smCtx *SMContext
+ 	ref, err := ResolveRef(id, pduSessID)
+@@ -422,8 +443,11 @@ func RemoveSMContext(ref string) {
+ 
+ 	smContext.NrdcIndicator = false
+ 
+-	deleteSMContext(ref)
++	intentCensusMu.Lock()
++	smContextPool.Delete(ref)
+ 	canonicalRef.Delete(canonicalName(smContext.Supi, smContext.PDUSessionID))
++	intentCensusRevision++
++	intentCensusMu.Unlock()
+ 	smContext.Log.Infof("smContext[%s] is deleted from pool", ref)
+ }
+ 
+@@ -466,7 +490,13 @@ func (smContext *SMContext) BuildCreatedData() *models.SmfPduSessionSmContextCre
+ func (smContext *SMContext) SetState(state SMContextState) {
+ 	oldState := SMContextState(atomic.LoadUint32((*uint32)(&smContext.state)))
+ 
++	intentCensusMu.Lock()
++	oldState = SMContextState(atomic.LoadUint32((*uint32)(&smContext.state)))
+ 	atomic.StoreUint32((*uint32)(&smContext.state), uint32(state))
++	if oldState != state {
++		intentCensusRevision++
++	}
++	intentCensusMu.Unlock()
+ 	smContext.Log.Tracef("State[%s] -> State[%s]", oldState, state)
+ }
+ 
+@@ -560,6 +590,7 @@ func (c *SMContext) findPSAandAllocUeIP(param *UPFSelectionParams) error {
+ 	if param == nil {
+ 		return fmt.Errorf("UPFSelectionParams is nil")
+ 	}
++	param.IntentContext = c
+ 
+ 	upi := GetUserPlaneInformation()
+ 	if GetSelf().ULCLSupport && CheckUEHasPreConfig(c.Supi) {
+diff --git a/internal/context/sm_context_inventory.go b/internal/context/sm_context_inventory.go
+index 3e109bf..e18fce2 100644
+--- a/internal/context/sm_context_inventory.go
++++ b/internal/context/sm_context_inventory.go
+@@ -2,30 +2,26 @@ package context
+ 
+ import (
+ 	"sort"
+-	"sync"
+ 	"time"
+ 
+-	"github.com/google/uuid"
+ )
+ 
+ var (
+-	smContextInventoryMu       sync.RWMutex
+-	smContextInventoryRevision uint64
+-	smfBootEpoch               = uuid.NewString()
++	smfBootEpoch = IntentBootEpoch
+ )
+ 
+ func storeSMContext(smContext *SMContext) {
+-	smContextInventoryMu.Lock()
+-	defer smContextInventoryMu.Unlock()
++	intentCensusMu.Lock()
++	defer intentCensusMu.Unlock()
+ 	smContextPool.Store(smContext.Ref, smContext)
+-	smContextInventoryRevision++
++	intentCensusRevision++
+ }
+ 
+ func deleteSMContext(ref string) {
+-	smContextInventoryMu.Lock()
+-	defer smContextInventoryMu.Unlock()
++	intentCensusMu.Lock()
++	defer intentCensusMu.Unlock()
+ 	smContextPool.Delete(ref)
+-	smContextInventoryRevision++
++	intentCensusRevision++
+ }
+ 
+ // VisitSMContextSnapshot visits one authoritative process-wide snapshot. The
+@@ -37,8 +33,8 @@ func deleteSMContext(ref string) {
+ // context locks would invert that established order and deadlock.
+ func VisitSMContextSnapshot(visitor func(*SMContext)) (bootEpoch string, observedAt time.Time) {
+ 	for {
+-		smContextInventoryMu.RLock()
+-		revision := smContextInventoryRevision
++		intentCensusMu.RLock()
++		revision := intentCensusRevision
+ 		contexts := make([]*SMContext, 0)
+ 		smContextPool.Range(func(_, value interface{}) bool {
+ 			if smContext, ok := value.(*SMContext); ok {
+@@ -46,16 +42,16 @@ func VisitSMContextSnapshot(visitor func(*SMContext)) (bootEpoch string, observe
+ 			}
+ 			return true
+ 		})
+-		smContextInventoryMu.RUnlock()
++		intentCensusMu.RUnlock()
+ 
+ 		sort.Slice(contexts, func(i, j int) bool { return contexts[i].Ref < contexts[j].Ref })
+ 		for _, smContext := range contexts {
+ 			smContext.SMLock.Lock()
+ 		}
+ 
+-		smContextInventoryMu.RLock()
+-		if smContextInventoryRevision != revision {
+-			smContextInventoryMu.RUnlock()
++		intentCensusMu.RLock()
++		if intentCensusRevision != revision {
++			intentCensusMu.RUnlock()
+ 			for i := len(contexts) - 1; i >= 0; i-- {
+ 				contexts[i].SMLock.Unlock()
+ 			}
+@@ -66,7 +62,7 @@ func VisitSMContextSnapshot(visitor func(*SMContext)) (bootEpoch string, observe
+ 		for _, smContext := range contexts {
+ 			visitor(smContext)
+ 		}
+-		smContextInventoryMu.RUnlock()
++		intentCensusMu.RUnlock()
+ 		for i := len(contexts) - 1; i >= 0; i-- {
+ 			contexts[i].SMLock.Unlock()
+ 		}
+diff --git a/internal/context/upf.go b/internal/context/upf.go
+index d5770a6..d93ce33 100644
+--- a/internal/context/upf.go
++++ b/internal/context/upf.go
+@@ -92,10 +92,11 @@ type UPF struct {
+ 
+ // UPFSelectionParams ... parameters for upf selection
+ type UPFSelectionParams struct {
+-	Dnn        string
+-	SNssai     *SNssai
+-	Dnai       string
+-	PDUAddress net.IP
++	IntentContext *SMContext
++	Dnn           string
++	SNssai        *SNssai
++	Dnai          string
++	PDUAddress    net.IP
+ }
+ 
+ // UPFInterfaceInfo store the UPF interface information
+diff --git a/internal/context/user_plane_information.go b/internal/context/user_plane_information.go
+index de49037..4204533 100644
+--- a/internal/context/user_plane_information.go
++++ b/internal/context/user_plane_information.go
+@@ -887,6 +887,12 @@ func (upi *UserPlaneInformation) SelectUPFAndAllocUEIP(selection *UPFSelectionPa
+ 	}
+ 	UPFList = upi.sortUPFListByName(UPFList)
+ 	sortedUPFList := createUPFListForSelection(UPFList)
++	filtered, bindIntent, releaseIntent, intentErr := BeginIntentUPFSelection(selection.IntentContext, sortedUPFList)
++	if intentErr != nil {
++		return nil, nil, false
++	}
++	defer releaseIntent()
++	sortedUPFList = filtered
+ 	for _, upf := range sortedUPFList {
+ 		logger.CtxLog.Debugf("check start UPF: %s",
+ 			upi.GetUPFNameByIp(upf.NodeID.ResolveNodeIdToIp().String()))
+@@ -904,6 +910,10 @@ func (upi *UserPlaneInformation) SelectUPFAndAllocUEIP(selection *UPFSelectionPa
+ 			logger.CtxLog.Debugf("check start UEIPPool(%+v)", pool.ueSubNet)
+ 			addr := pool.Allocate(selection.PDUAddress)
+ 			if addr != nil {
++				if err := bindIntent(upf); err != nil {
++					pool.Release(addr)
++					return nil, nil, false
++				}
+ 				logger.CtxLog.Infof("Selected UPF: %s",
+ 					upi.GetUPFNameByIp(upf.NodeID.ResolveNodeIdToIp().String()))
+ 				return upf, addr, useStaticIPPool
+diff --git a/internal/sbi/api_oam.go b/internal/sbi/api_oam.go
+index cc8acce..117ec3a 100644
+--- a/internal/sbi/api_oam.go
++++ b/internal/sbi/api_oam.go
+@@ -11,6 +11,16 @@ import (
+ 
+ func (s *Server) getOAMRoutes() []Route {
+ 	return []Route{
++		{Name: "Get SM Context Inventory", Method: http.MethodGet, Pattern: "/sm-contexts", APIFunc: s.HTTPGetSMContextInventory},
++		{Name: "Native active session census", Method: http.MethodGet, Pattern: "/session-active-inventory", APIFunc: s.HTTPGetSessionActiveInventory},
++		{Name: "Native UPF control capability", Method: http.MethodGet, Pattern: "/upf-control-capability", APIFunc: s.HTTPIntentUPFCapability},
++		{Name: "Native UPF read", Method: http.MethodPost, Pattern: "/upf-control/read", APIFunc: s.HTTPIntentUPFRead},
++		{Name: "Native UPF register", Method: http.MethodPost, Pattern: "/upf-control/register", APIFunc: s.HTTPIntentUPFRegister},
++		{Name: "Native UPF selection", Method: http.MethodPost, Pattern: "/upf-control/selection", APIFunc: s.HTTPIntentUPFSelection},
++		{Name: "Native UPF unregister", Method: http.MethodPost, Pattern: "/upf-control/unregister", APIFunc: s.HTTPIntentUPFUnregister},
++		{Name: "Native pending session admission", Method: http.MethodPost, Pattern: "/session-admissions", APIFunc: s.HTTPIntentAdmissionRegister},
++		{Name: "Native session admission read", Method: http.MethodGet, Pattern: "/session-admissions/:nonce", APIFunc: s.HTTPIntentAdmissionRead},
++		{Name: "Native session admission release", Method: http.MethodPost, Pattern: "/session-admissions/:nonce/release", APIFunc: s.HTTPIntentAdmissionRelease},
+ 		{
+ 			Name:    "Index",
+ 			Method:  http.MethodGet,
+@@ -25,18 +35,15 @@ func (s *Server) getOAMRoutes() []Route {
+ 			Pattern: "/ue-pdu-session-info/:smContextRef",
+ 			APIFunc: s.HTTPGetUEPDUSessionInfo,
+ 		},
+-		{
+-			Name:    "Get SM Context Inventory",
+-			Method:  http.MethodGet,
+-			Pattern: "/sm-contexts",
+-			APIFunc: s.HTTPGetSMContextInventory,
+-		},
+ 		{
+ 			Name:    "Get SMF Userplane Information",
+ 			Method:  http.MethodGet,
+ 			Pattern: "/user-plane-info/",
+ 			APIFunc: s.HTTPGetSMFUserPlaneInfo,
+ 		},
++		{Name: "Exact session QER", Method: http.MethodPost, Pattern: "/session-qer-actuation", APIFunc: s.HTTPActuateSessionQER},
++		{Name: "Exact session QER inventory", Method: http.MethodPost, Pattern: "/session-qer-inventory", APIFunc: s.HTTPGetSessionQERInventory},
++		{Name: "Exact session QER capability", Method: http.MethodGet, Pattern: "/session-qer-capability", APIFunc: s.HTTPGetSessionQERCapability},
+ 		{
+ 			Name:    "Actuate PFCP QER MBR",
+ 			Method:  http.MethodPost,
+@@ -97,7 +104,9 @@ func (s *Server) HTTPActuateQER(c *gin.Context) {
+ 		c.JSON(http.StatusBadRequest, gin.H{"error": "MBR must be between 1 and 500000 Kbps"})
+ 		return
+ 	}
+-	s.Processor().HandleOAMQERActuation(c, request.SUPI, request.UplinkMBRKbps, request.DownlinkMBRKbps)
++	s.Processor().HandleOAMQERActuation(
++		c, request.SMContextRef, request.SUPI, request.DNN, request.SST, request.SD,
++		request.UplinkMBRKbps, request.DownlinkMBRKbps)
+ }
+ 
+ func (s *Server) HTTPGetUEPDUSessionInfo(c *gin.Context) {
+@@ -106,6 +115,10 @@ func (s *Server) HTTPGetUEPDUSessionInfo(c *gin.Context) {
+ 	s.Processor().HandleOAMGetUEPDUSessionInfo(c, smContextRef)
+ }
+ 
++func (s *Server) HTTPGetSMFUserPlaneInfo(c *gin.Context) {
++	s.Processor().HandleGetSMFUserPlaneInfo(c)
++}
++
+ func (s *Server) HTTPGetSMContextInventory(c *gin.Context) {
+ 	expected := os.Getenv("CITYVERSE_SMF_INVENTORY_TOKEN")
+ 	if expected == "" {
+@@ -119,7 +132,3 @@ func (s *Server) HTTPGetSMContextInventory(c *gin.Context) {
+ 	}
+ 	s.Processor().HandleOAMGetSMContextInventory(c)
+ }
+-
+-func (s *Server) HTTPGetSMFUserPlaneInfo(c *gin.Context) {
+-	s.Processor().HandleGetSMFUserPlaneInfo(c)
+-}
+diff --git a/internal/sbi/api_oam_inventory_test.go b/internal/sbi/api_oam_inventory_test.go
+index 739a8e4..5b97c07 100644
+--- a/internal/sbi/api_oam_inventory_test.go
++++ b/internal/sbi/api_oam_inventory_test.go
+@@ -1,13 +1,49 @@
+ package sbi
+ 
+ import (
++	"encoding/json"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"testing"
+ 
++	"github.com/free5gc/smf/internal/sbi/processor"
+ 	"github.com/gin-gonic/gin"
+ )
+ 
++type inventoryTestApp struct{ ServerSmf }
++
++func (inventoryTestApp) Processor() *processor.Processor { return &processor.Processor{} }
++
++// Exercise actual route registration and successful processor projection. A binary
++// missing the deployed route must fail before any rollout, even for zero UEs.
++func TestDeployedInventoryRouteCompatibility(t *testing.T) {
++	t.Setenv("CITYVERSE_SMF_INVENTORY_TOKEN", "inventory-test-only")
++	server := &Server{ServerSmf: inventoryTestApp{}}
++	router := gin.New()
++	applyRoutes(router.Group("/nsmf-oam/v1"), server.getOAMRoutes())
++	var epoch string
++	for i := 0; i < 2; i++ {
++		r := httptest.NewRequest(http.MethodGet, "/nsmf-oam/v1/sm-contexts", nil)
++		r.Header.Set("Authorization", "Bearer inventory-test-only")
++		w := httptest.NewRecorder()
++		router.ServeHTTP(w, r)
++		if w.Code != 200 {
++			t.Fatalf("legacy inventory status %d", w.Code)
++		}
++		var proof processor.SMContextInventory
++		if err := json.Unmarshal(w.Body.Bytes(), &proof); err != nil {
++			t.Fatal(err)
++		}
++		if proof.SchemaVersion != "cityverse.smf-oam/v2" || !proof.InventoryComplete || proof.Consistency != "atomic-membership-and-projection" || proof.BootEpoch == "" || proof.ObservedAt == "" || proof.Count != len(proof.Contexts) || proof.Contexts == nil {
++			t.Fatalf("invalid legacy proof: %+v", proof)
++		}
++		if i > 0 && proof.BootEpoch != epoch {
++			t.Fatal("boot epoch changed between atomic reads")
++		}
++		epoch = proof.BootEpoch
++	}
++}
++
+ func TestSMContextInventoryRequiresConfiguredBearer(t *testing.T) {
+ 	tests := []struct {
+ 		name       string
+diff --git a/internal/sbi/api_session_qer.go b/internal/sbi/api_session_qer.go
+new file mode 100644
+index 0000000..cc0051d
+--- /dev/null
++++ b/internal/sbi/api_session_qer.go
+@@ -0,0 +1,73 @@
++package sbi
++
++import "github.com/gin-gonic/gin"
++
++func sessionQerAuthorized(c *gin.Context) bool {
++	if ok, status, message := qerActuatorAuthorized(c); !ok {
++		c.JSON(status, gin.H{"error": message})
++		return false
++	}
++	return true
++}
++func (s *Server) HTTPActuateSessionQER(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleSessionQerActuation(c)
++	}
++}
++func (s *Server) HTTPGetSessionQERInventory(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleSessionQerInventory(c)
++	}
++}
++func (s *Server) HTTPGetSessionQERCapability(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleSessionQerCapability(c)
++	}
++}
++
++func (s *Server) HTTPGetSessionActiveInventory(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleSessionActiveInventory(c)
++	}
++}
++
++func (s *Server) HTTPIntentUPFRead(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentUPFRead(c)
++	}
++}
++func (s *Server) HTTPIntentUPFCapability(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentUPFCapability(c)
++	}
++}
++func (s *Server) HTTPIntentUPFRegister(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentUPFRegister(c)
++	}
++}
++func (s *Server) HTTPIntentUPFSelection(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentUPFSelection(c)
++	}
++}
++func (s *Server) HTTPIntentUPFUnregister(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentUPFUnregister(c)
++	}
++}
++func (s *Server) HTTPIntentAdmissionRegister(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentAdmissionRegister(c)
++	}
++}
++func (s *Server) HTTPIntentAdmissionRead(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentAdmissionRead(c)
++	}
++}
++func (s *Server) HTTPIntentAdmissionRelease(c *gin.Context) {
++	if sessionQerAuthorized(c) {
++		s.Processor().HandleIntentAdmissionRelease(c)
++	}
++}
+diff --git a/internal/sbi/api_upi.go b/internal/sbi/api_upi.go
+index 1f6769c..b71cd17 100644
+--- a/internal/sbi/api_upi.go
++++ b/internal/sbi/api_upi.go
+@@ -2,6 +2,7 @@ package sbi
+ 
+ import (
+ 	"net/http"
++	"os"
+ 
+ 	"github.com/gin-gonic/gin"
+ 
+@@ -58,6 +59,10 @@ func (s *Server) GetUpNodesLinks(c *gin.Context) {
+ }
+ 
+ func (s *Server) PostUpNodesLinks(c *gin.Context) {
++	if os.Getenv("SMF_SESSION_QER_STATE_DIR") != "" {
++		c.JSON(http.StatusForbidden, gin.H{"error": "commissioned UPF control required"})
++		return
++	}
+ 	upi := smf_context.GetSelf().UserPlaneInformation
+ 	upi.Mu.Lock()
+ 	defer upi.Mu.Unlock()
+@@ -82,6 +87,10 @@ func (s *Server) PostUpNodesLinks(c *gin.Context) {
+ }
+ 
+ func (s *Server) DeleteUpNodeLink(c *gin.Context) {
++	if os.Getenv("SMF_SESSION_QER_STATE_DIR") != "" {
++		c.JSON(http.StatusForbidden, gin.H{"error": "commissioned UPF control required"})
++		return
++	}
+ 	// current version does not allow node deletions when ulcl is enabled
+ 	if smf_context.GetSelf().ULCLSupport {
+ 		c.Set(sbi.IN_PB_DETAILS_CTX_STR, http.StatusText(int(http.StatusForbidden)))
+diff --git a/internal/sbi/processor/oam_qer.go b/internal/sbi/processor/oam_qer.go
+index 9a0fac1..1fe18b3 100644
+--- a/internal/sbi/processor/oam_qer.go
++++ b/internal/sbi/processor/oam_qer.go
+@@ -81,18 +81,24 @@ func rollbackQERs(smContext *smf_context.SMContext, updates []qerRollback) bool
+ func actuateSMContextQER(smContext *smf_context.SMContext, supi string, dnn string, sst int32, sd string,
+ 	uplinkMBRKbps, downlinkMBRKbps uint64,
+ ) qerActuationResult {
+-	result := qerActuationResult{SMContextRef: smContext.Ref, Status: "failed"}
+ 	smContext.SMLock.Lock()
+ 	defer smContext.SMLock.Unlock()
++	if smContext.Supi != supi {
++		return qerActuationResult{SMContextRef: smContext.Ref, Status: "skipped"}
++	}
++	if !sessionQerLegacyWriteAllowed(smContext.Ref) {
++		return qerActuationResult{SMContextRef: smContext.Ref, Status: "failed", Error: "session has an owned or unresolved exact-session policy"}
++	}
++	return actuateSMContextQERLocked(smContext, dnn, sst, sd, uplinkMBRKbps, downlinkMBRKbps)
++}
++
++func actuateSMContextQERLocked(smContext *smf_context.SMContext, dnn string, sst int32, sd string, uplinkMBRKbps, downlinkMBRKbps uint64) qerActuationResult {
++	result := qerActuationResult{SMContextRef: smContext.Ref, Status: "failed"}
+ 
+ 	if smf_context.GetSMContextByRef(smContext.Ref) != smContext {
+ 		result.Error = "SM context is no longer active"
+ 		return result
+ 	}
+-	if smContext.Supi != supi {
+-		result.Status = "skipped"
+-		return result
+-	}
+ 	result.DNN = smContext.Dnn
+ 	if smContext.SNssai != nil {
+ 		result.SST = smContext.SNssai.Sst
+@@ -162,7 +168,9 @@ func actuateSMContextQER(smContext *smf_context.SMContext, supi string, dnn stri
+ 	return result
+ }
+ 
+-func (p *Processor) HandleOAMQERActuation(c *gin.Context, supi string, uplinkMBRKbps, downlinkMBRKbps uint64) {
++func (p *Processor) HandleOAMQERActuation(c *gin.Context, smContextRef, supi, dnn string, sst int32, sd string,
++	uplinkMBRKbps, downlinkMBRKbps uint64,
++) {
+ 	contexts := make([]*smf_context.SMContext, 0)
+ 	smf_context.VisitSMContextSnapshot(func(smContext *smf_context.SMContext) {
+ 		if smContext.Supi == supi {
+@@ -178,7 +186,10 @@ func (p *Processor) HandleOAMQERActuation(c *gin.Context, supi string, uplinkMBR
+ 	matched := 0
+ 	applied := 0
+ 	for _, smContext := range contexts {
+-		result := actuateSMContextQER(smContext, supi, "", 0, "", uplinkMBRKbps, downlinkMBRKbps)
++		if supi != "" && smContext.Supi != supi {
++			continue
++		}
++		result := actuateSMContextQER(smContext, supi, dnn, sst, sd, uplinkMBRKbps, downlinkMBRKbps)
+ 		if result.Status == "skipped" {
+ 			continue
+ 		}
+diff --git a/internal/sbi/processor/oam_session_qer.go b/internal/sbi/processor/oam_session_qer.go
+new file mode 100644
+index 0000000..eca1411
+--- /dev/null
++++ b/internal/sbi/processor/oam_session_qer.go
+@@ -0,0 +1,855 @@
++package processor
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"sort"
++	"strconv"
++	"strings"
++	"syscall"
++	"time"
++
++	smf_context "github.com/free5gc/smf/internal/context"
++	"github.com/gin-gonic/gin"
++)
++
++type SessionQerIdentity struct {
++	Key       string `json:"session_key"`
++	Scope     string `json:"networkScope"`
++	SUPI      string `json:"supi"`
++	SessionID int32  `json:"sessionId"`
++	Epoch     string `json:"establishedEpoch"`
++	Ref       string `json:"smContextRef"`
++	SEID      string `json:"pfcpSeid"`
++	UPFEpoch  string `json:"upfEpoch"`
++	SST       int32  `json:"sst"`
++	SD        string `json:"sd"`
++	DNN       string `json:"dnn"`
++}
++
++type SessionQerRates struct {
++	UL uint64 `json:"ul"`
++	DL uint64 `json:"dl"`
++}
++type SessionNativeQer struct {
++	ID     uint32          `json:"id"`
++	PDRIDs []uint16        `json:"pdrIds"`
++	Rates  SessionQerRates `json:"mbrKbps"`
++}
++type SessionQerView struct {
++	SessionQerIdentity
++	Version    string             `json:"version"`
++	Owner      string             `json:"owner_id"`
++	Operation  string             `json:"operation_id"`
++	QERs       []SessionNativeQer `json:"qers"`
++	ObservedAt float64            `json:"observed_at"`
++	UPFID      string             `json:"upf_id"`
++	NodeIP     string             `json:"upf_node_ip"`
++	SMFBoot    string             `json:"smf_boot_epoch"`
++	CreatedAt  float64            `json:"created_at"`
++}
++type sessionQerMetadata struct {
++	Owner     string `json:"owner_id"`
++	Operation string `json:"operation_id"`
++}
++type SessionQerRequest struct {
++	Identity  SessionQerIdentity  `json:"identity"`
++	Rates     SessionQerRates     `json:"ratesKbps"`
++	Owner     string              `json:"ownerId"`
++	Operation string              `json:"operationId"`
++	Expected  string              `json:"expectedVersion"`
++	Phase     string              `json:"phase"`
++	Restore   *sessionQerMetadata `json:"restoreMetadata"`
++}
++type sessionQerJournal struct {
++	Ref           string             `json:"ref"`
++	Revision      uint64             `json:"revision"`
++	Owner         string             `json:"owner"`
++	Operation     string             `json:"operation"`
++	Pending       bool               `json:"pending"`
++	Baseline      sessionQerMetadata `json:"baseline"`
++	BaselineRates SessionQerRates    `json:"baseline_rates"`
++	Desired       SessionQerRates    `json:"desired"`
++	Initial       sessionQerMetadata `json:"initial"`
++	InitialRates  SessionQerRates    `json:"initial_rates"`
++	Claimed       bool               `json:"claimed"`
++	History       []sessionQerStep   `json:"history"`
++}
++
++type sessionQerStep struct {
++	Owner         string             `json:"owner"`
++	Operation     string             `json:"operation"`
++	Baseline      sessionQerMetadata `json:"baseline"`
++	BaselineRates SessionQerRates    `json:"baseline_rates"`
++	Desired       SessionQerRates    `json:"desired"`
++}
++
++// Each engine is request-scoped; only the exact session's SMLock and journal lock are held.
++type SessionQerEngine struct {
++	Scope           string
++	StateDir        string
++	Lookup          func(string) *smf_context.SMContext
++	Read            func(*smf_context.SMContext) (SessionQerView, error)
++	InventoryReader func() func(*smf_context.SMContext) (SessionQerView, error)
++	InventoryCensus func() (func(*smf_context.SMContext) (SessionQerView, error), func(map[string]map[string]bool) ([]gin.H, error))
++	Apply           func(*smf_context.SMContext, SessionQerRates) error
++}
++
++func canonicalSessionKey(scope, supi string, id int32, epoch string) string {
++	raw, _ := json.Marshal([]interface{}{scope, supi, id, epoch})
++	return string(raw)
++}
++func sessionQerDigest(v interface{}) string {
++	raw, _ := json.Marshal(v)
++	sum := sha256.Sum256(raw)
++	return hex.EncodeToString(sum[:])
++}
++
++func (e *SessionQerEngine) journal(ref string) (sessionQerJournal, func(), error) {
++	record := sessionQerJournal{Ref: ref}
++	if !filepath.IsAbs(e.StateDir) {
++		return record, nil, errors.New("persistent session journal is not configured")
++	}
++	if err := os.MkdirAll(e.StateDir, 0700); err != nil {
++		return record, nil, err
++	}
++	info, err := os.Lstat(e.StateDir)
++	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
++		return record, nil, errors.New("invalid journal directory")
++	}
++	path := filepath.Join(e.StateDir, sessionQerDigest(ref))
++	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
++	if err != nil {
++		return record, nil, err
++	}
++	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
++		lock.Close()
++		return record, nil, errors.New("session journal is busy")
++	}
++	release := func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close() }
++	file, err := os.OpenFile(path+".json", os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++	if os.IsNotExist(err) {
++		return record, release, nil
++	}
++	if err != nil {
++		release()
++		return record, nil, err
++	}
++	defer file.Close()
++	raw, err := io.ReadAll(io.LimitReader(file, 16385))
++	if err != nil || len(raw) > 16384 {
++		release()
++		return record, nil, errors.New("invalid journal length")
++	}
++	if json.Unmarshal(raw, &record) != nil || record.Ref != ref {
++		release()
++		return record, nil, errors.New("invalid session journal")
++	}
++	return record, release, nil
++}
++
++func (e *SessionQerEngine) save(record sessionQerJournal) error {
++	raw, err := json.Marshal(record)
++	if err != nil {
++		return err
++	}
++	file, err := os.CreateTemp(e.StateDir, ".session-qer-")
++	if err != nil {
++		return err
++	}
++	name := file.Name()
++	defer os.Remove(name)
++	if err = file.Chmod(0600); err == nil {
++		_, err = file.Write(raw)
++	}
++	if err == nil {
++		err = file.Sync()
++	}
++	closeErr := file.Close()
++	if err == nil {
++		err = closeErr
++	}
++	if err != nil {
++		return err
++	}
++	if err = os.Rename(name, filepath.Join(e.StateDir, sessionQerDigest(record.Ref)+".json")); err != nil {
++		return err
++	}
++	dir, err := os.Open(e.StateDir)
++	if err != nil {
++		return err
++	}
++	defer dir.Close()
++	return dir.Sync()
++}
++
++func (e *SessionQerEngine) lockedView(sm *smf_context.SMContext, record sessionQerJournal) (SessionQerView, error) {
++	view, err := e.Read(sm)
++	if err != nil {
++		return view, err
++	}
++	if view.Scope != e.Scope || view.Ref != sm.Ref || view.SUPI != sm.Supi || view.SessionID != sm.PDUSessionID || view.Epoch != sm.Ref || view.Key != canonicalSessionKey(e.Scope, sm.Supi, sm.PDUSessionID, sm.Ref) {
++		return view, errors.New("native session identity mismatch")
++	}
++	view.Owner, view.Operation = record.Owner, record.Operation
++	view.Version = sessionQerDigest(struct {
++		Identity SessionQerIdentity
++		QERs     []SessionNativeQer
++		Journal  sessionQerJournal
++	}{view.SessionQerIdentity, view.QERs, record})
++	return view, nil
++}
++
++func sessionRate(view SessionQerView) (SessionQerRates, error) {
++	var rate SessionQerRates
++	count := 0
++	for _, q := range view.QERs {
++		if q.Rates.UL != 0 || q.Rates.DL != 0 {
++			rate = q.Rates
++			count++
++		}
++	}
++	if count != 1 || rate.UL == 0 || rate.DL == 0 {
++		return rate, errors.New("unsupported AMBR topology")
++	}
++	return rate, nil
++}
++
++func (e *SessionQerEngine) View(ref string) (SessionQerView, error) {
++	sm := e.Lookup(ref)
++	if sm == nil {
++		return SessionQerView{}, errors.New("session not found")
++	}
++	sm.SMLock.Lock()
++	defer sm.SMLock.Unlock()
++	if e.Lookup(ref) != sm || sm.State() != smf_context.Active {
++		return SessionQerView{}, errors.New("session is no longer active")
++	}
++	record, release, err := e.journal(ref)
++	if err != nil {
++		return SessionQerView{}, err
++	}
++	defer release()
++	return e.lockedView(sm, record)
++}
++
++func (e *SessionQerEngine) Actuate(request SessionQerRequest) (SessionQerView, error) {
++	if request.Owner == "" || request.Operation == "" || request.Expected == "" || len(request.Owner) > 256 || len(request.Operation) > 256 ||
++		request.Rates.UL < 1 || request.Rates.DL < 1 || request.Rates.UL > 500000 || request.Rates.DL > 500000 || (request.Phase != "apply" && request.Phase != "restore") {
++		return SessionQerView{}, errors.New("invalid exact session command")
++	}
++	sm := e.Lookup(request.Identity.Ref)
++	if sm == nil {
++		return SessionQerView{}, errors.New("session not found")
++	}
++	sm.SMLock.Lock()
++	defer sm.SMLock.Unlock()
++	if e.Lookup(sm.Ref) != sm || sm.State() != smf_context.Active {
++		return SessionQerView{}, errors.New("session is no longer active")
++	}
++	record, release, err := e.journal(sm.Ref)
++	if err != nil {
++		return SessionQerView{}, err
++	}
++	defer release()
++	view, err := e.lockedView(sm, record)
++	if err != nil {
++		return view, err
++	}
++	if view.SessionQerIdentity != request.Identity || view.Version != request.Expected {
++		return view, errors.New("session identity or version changed")
++	}
++	actual, err := sessionRate(view)
++	if err != nil {
++		return view, err
++	}
++	finalRelease := false
++	if request.Phase == "restore" {
++		previous := request.Restore != nil && *request.Restore == record.Baseline && request.Rates == record.BaselineRates
++		finalRelease = request.Restore != nil && record.Claimed && *request.Restore == record.Initial && request.Rates == record.InitialRates
++		if record.Owner != request.Owner || record.Operation != request.Operation || (!previous && !finalRelease) || (actual != record.Desired && actual != record.BaselineRates) {
++			return view, errors.New("restoration owner or baseline changed")
++		}
++	} else {
++		if record.Pending || (record.Owner != "" && record.Owner != request.Owner) || request.Restore != nil {
++			return view, errors.New("session policy owner changed or unresolved action exists")
++		}
++		if !record.Claimed {
++			record.Initial = sessionQerMetadata{record.Owner, record.Operation}
++			record.InitialRates = actual
++			record.Claimed = true
++		}
++		step := sessionQerStep{record.Owner, record.Operation, record.Baseline, record.BaselineRates, record.Desired}
++		record.History = append(record.History, step)
++		// shortcut: retain eight rollback predecessors; original ownership release remains available beyond that.
++		if len(record.History) > 8 {
++			record.History = record.History[len(record.History)-8:]
++		}
++		record.Baseline = sessionQerMetadata{record.Owner, record.Operation}
++		record.BaselineRates = actual
++		record.Desired = request.Rates
++	}
++	record.Owner, record.Operation, record.Pending = request.Owner, request.Operation, true
++	record.Revision++
++	if err = e.save(record); err != nil {
++		return view, errors.New("durable session intent could not be recorded")
++	}
++	if actual != request.Rates {
++		if err = e.Apply(sm, request.Rates); err != nil {
++			return view, errors.New("PFCP outcome requires native readback")
++		}
++	}
++	after, err := e.lockedView(sm, record)
++	if err != nil {
++		return view, errors.New("independent QER readback unavailable")
++	}
++	got, err := sessionRate(after)
++	if err != nil || got != request.Rates {
++		return after, errors.New("native QER differs from requested rates")
++	}
++	// The write never changes PDR identity, session epoch or unrelated QERs.
++	if after.SessionQerIdentity != view.SessionQerIdentity || len(after.QERs) != len(view.QERs) {
++		return after, errors.New("native topology changed")
++	}
++	for i, q := range view.QERs {
++		n := after.QERs[i]
++		if q.ID != n.ID || fmt.Sprint(q.PDRIDs) != fmt.Sprint(n.PDRIDs) || ((q.Rates.UL == 0 && q.Rates.DL == 0) && q.Rates != n.Rates) {
++			return after, errors.New("native QER/PDR topology changed")
++		}
++	}
++	record.Pending = false
++	record.Revision++
++	if request.Phase == "restore" {
++		if finalRelease {
++			record.Owner, record.Operation = record.Initial.Owner, record.Initial.Operation
++			record.Baseline = record.Initial
++			record.BaselineRates = record.InitialRates
++			record.Desired = record.InitialRates
++			record.History = nil
++			record.Claimed = false
++		} else {
++			record.Owner, record.Operation = request.Restore.Owner, request.Restore.Operation
++			if len(record.History) > 0 {
++				last := record.History[len(record.History)-1]
++				record.History = record.History[:len(record.History)-1]
++				record.Baseline = last.Baseline
++				record.BaselineRates = last.BaselineRates
++				record.Desired = last.Desired
++			}
++		}
++	}
++	if err = e.save(record); err != nil {
++		return after, errors.New("session completion journal unresolved")
++	}
++	return e.lockedView(sm, record)
++}
++
++func decodeSessionBody(c *gin.Context, value interface{}) bool {
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 65536)
++	decoder := json.NewDecoder(c.Request.Body)
++	decoder.DisallowUnknownFields()
++	if decoder.Decode(value) != nil {
++		c.JSON(400, gin.H{"error": "invalid exact-session request"})
++		return false
++	}
++	var extra interface{}
++	if decoder.Decode(&extra) != io.EOF {
++		c.JSON(400, gin.H{"error": "one JSON object required"})
++		return false
++	}
++	return true
++}
++
++func (e *SessionQerEngine) HandleActuation(c *gin.Context) {
++	var request SessionQerRequest
++	if !decodeSessionBody(c, &request) {
++		return
++	}
++	view, err := e.Actuate(request)
++	if err != nil {
++		c.JSON(409, gin.H{"error": "exact-session precondition or native outcome unresolved"})
++		return
++	}
++	c.JSON(200, gin.H{"accepted": true, "session_key": view.Key, "version": view.Version})
++}
++func (e *SessionQerEngine) HandleInventory(c *gin.Context) {
++	if e.InventoryReader != nil {
++		copy := *e
++		copy.Read = e.InventoryReader()
++		copy.InventoryReader = nil
++		e = &copy
++	}
++	var request struct {
++		SessionKeys []string `json:"session_keys"`
++	}
++	if !decodeSessionBody(c, &request) {
++		return
++	}
++	if len(request.SessionKeys) < 1 || len(request.SessionKeys) > 1024 {
++		c.JSON(400, gin.H{"error": "bounded exact session keys required"})
++		return
++	}
++	sessions := make([]SessionQerView, 0, len(request.SessionKeys))
++	seen := map[string]bool{}
++	stamp := float64(time.Now().UnixNano()) / 1e9
++	for _, key := range request.SessionKeys {
++		var fields []json.RawMessage
++		if json.Unmarshal([]byte(key), &fields) != nil || len(fields) != 4 || seen[key] {
++			c.JSON(400, gin.H{"error": "invalid or duplicate session key"})
++			return
++		}
++		seen[key] = true
++		var ref string
++		if json.Unmarshal(fields[3], &ref) != nil {
++			c.JSON(400, gin.H{"error": "session epoch must be native SM context reference"})
++			return
++		}
++		view, err := e.View(ref)
++		if err != nil || view.Key != key {
++			c.JSON(409, gin.H{"error": "session identity or native inventory unavailable"})
++			return
++		}
++		sessions = append(sessions, view)
++		if view.ObservedAt < stamp {
++			stamp = view.ObservedAt
++		}
++	}
++	c.JSON(200, gin.H{"source": "native-upf-qer", "observed_at": stamp, "sessions": sessions})
++}
++
++func nativeUPFSessionView(sm *smf_context.SMContext, scope string, origins map[string]string) (SessionQerView, error) {
++	return nativeUPFSessionViewWithRead(sm, scope, origins, readNativeUPFDump)
++}
++
++func readNativeUPFDump(origin string) ([]byte, error) {
++	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect forbidden") }, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
++	response, err := client.Get(strings.TrimRight(origin, "/") + "/v1/upf-state")
++	if err != nil {
++		return nil, errors.New("native UPF read unavailable")
++	}
++	defer response.Body.Close()
++	if response.StatusCode != 200 {
++		return nil, errors.New("native UPF read failed")
++	}
++	raw, err := io.ReadAll(io.LimitReader(response.Body, 8*1024*1024+1))
++	if err != nil || len(raw) > 8*1024*1024 {
++		return nil, errors.New("native evidence exceeds bounds")
++	}
++	return raw, nil
++}
++
++func requestNativeUPFReader() func(string) ([]byte, error) {
++	dumps := map[string][]byte{}
++	started, bytes := time.Now(), 0
++	return func(origin string) ([]byte, error) {
++		if raw, ok := dumps[origin]; ok {
++			return raw, nil
++		}
++		if len(dumps) >= 64 || time.Since(started) >= 10*time.Second {
++			return nil, errors.New("native UPF census exceeds bounded request budget")
++		}
++		raw, err := readNativeUPFDump(origin)
++		if err == nil {
++			bytes += len(raw)
++			if bytes > 32*1024*1024 {
++				return nil, errors.New("native UPF census exceeds memory budget")
++			}
++			dumps[origin] = raw
++		}
++		return raw, err
++	}
++}
++
++func verifyNativeFullUPFCensus(origins map[string]string, read func(string) ([]byte, error), expected map[string]map[string]bool) ([]gin.H, error) {
++	upi := smf_context.GetUserPlaneInformation()
++	upi.Mu.RLock()
++	nodes := map[string]*smf_context.UPNode{}
++	for name, node := range upi.UPFs {
++		nodes[name] = node
++	}
++	upi.Mu.RUnlock()
++	if len(nodes) == 0 || len(nodes) > 64 {
++		return nil, errors.New("bounded native UPF topology required")
++	}
++	seenIPs := map[string]bool{}
++	rows := []gin.H{}
++	for target, node := range nodes {
++		if node == nil || node.UPF == nil {
++			return nil, errors.New("invalid native UPF")
++		}
++		ip := node.NodeID.ResolveNodeIdToIp().String()
++		if seenIPs[ip] {
++			return nil, errors.New("ambiguous native UPF node address")
++		}
++		seenIPs[ip] = true
++		origin := origins[ip]
++		u, err := url.Parse(origin)
++		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
++			return nil, errors.New("fixed native origin required")
++		}
++		raw, err := read(origin)
++		if err != nil {
++			return nil, err
++		}
++		var dump struct {
++			Schema     string        `json:"schemaVersion"`
++			Source     string        `json:"source"`
++			Available  bool          `json:"available"`
++			Epoch      string        `json:"epoch"`
++			ObservedAt string        `json:"observedAt"`
++			UPF        string        `json:"upf"`
++			Errors     []interface{} `json:"errors"`
++			Residuals  []interface{} `json:"residuals"`
++			Sessions   []struct {
++				SEID     interface{} `json:"pfcpSeid"`
++				Evidence string      `json:"evidence"`
++				UPF      string      `json:"upf"`
++			} `json:"sessions"`
++			QERs []struct {
++				SEID interface{} `json:"pfcpSeid"`
++			} `json:"qers"`
++			PDRs []struct {
++				SEID interface{} `json:"seid"`
++			} `json:"pdrs"`
++		}
++		decoder := json.NewDecoder(bytes.NewReader(raw))
++		decoder.UseNumber()
++		if decoder.Decode(&dump) != nil {
++			return nil, errors.New("invalid native dump")
++		}
++		stamp, err := time.Parse(time.RFC3339Nano, dump.ObservedAt)
++		if err != nil || time.Since(stamp) > 15*time.Second || time.Until(stamp) > time.Second || dump.Schema != "cityverse.upf/v1" || dump.Source != "gtp5g-netlink" || !dump.Available || dump.Epoch == "" || dump.UPF == "" || dump.Errors == nil || dump.Residuals == nil || len(dump.Errors)+len(dump.Residuals) != 0 || dump.Sessions == nil || dump.QERs == nil || dump.PDRs == nil {
++			return nil, errors.New("incomplete native dump")
++		}
++		actual := map[string]bool{}
++		for _, session := range dump.Sessions {
++			seid := fmt.Sprint(session.SEID)
++			id, parseErr := strconv.ParseUint(seid, 10, 64)
++			if parseErr != nil || id == 0 || actual[seid] || session.Evidence != "kernel-installed-pdr-far" || session.UPF != dump.UPF {
++				return nil, errors.New("invalid native kernel session")
++			}
++			actual[seid] = true
++		}
++		if len(actual) != len(expected[ip]) {
++			return nil, errors.New("kernel and SMF session census differ")
++		}
++		for seid := range actual {
++			if !expected[ip][seid] {
++				return nil, errors.New("orphan kernel session")
++			}
++		}
++		for _, qer := range dump.QERs {
++			if !actual[fmt.Sprint(qer.SEID)] {
++				return nil, errors.New("orphan kernel QER")
++			}
++		}
++		for _, pdr := range dump.PDRs {
++			if !actual[fmt.Sprint(pdr.SEID)] {
++				return nil, errors.New("orphan kernel PDR")
++			}
++		}
++		rows = append(rows, gin.H{"target_id": target, "upf_id": node.UPF.UUID(), "node_ip": ip, "upf_epoch": dump.Epoch, "observed_at": float64(stamp.UnixNano()) / 1e9})
++	}
++	for ip := range expected {
++		if !seenIPs[ip] {
++			return nil, errors.New("SMF session references unknown UPF")
++		}
++	}
++	upi.Mu.RLock()
++	defer upi.Mu.RUnlock()
++	if len(upi.UPFs) != len(nodes) {
++		return nil, errors.New("UPF topology changed during census")
++	}
++	for name, node := range nodes {
++		if upi.UPFs[name] != node {
++			return nil, errors.New("UPF topology changed during census")
++		}
++	}
++	return rows, nil
++}
++
++func nativeUPFSessionViewWithRead(sm *smf_context.SMContext, scope string, origins map[string]string, read func(string) ([]byte, error)) (SessionQerView, error) {
++	view := SessionQerView{}
++	if len(sm.AMBRQerMap) != 1 || sm.SNssai == nil {
++		return view, errors.New("single-UPF AMBR topology required")
++	}
++	var upf *smf_context.UPF
++	for id := range sm.AMBRQerMap {
++		upf = smf_context.GetUpfById(id.String())
++	}
++	if upf == nil {
++		return view, errors.New("UPF unavailable")
++	}
++	ip := upf.NodeID.ResolveNodeIdToIp().String()
++	ctx := sm.PFCPContext[ip]
++	if ctx == nil || ctx.RemoteSEID == 0 {
++		return view, errors.New("PFCP session unavailable")
++	}
++	origin := origins[ip]
++	parsed, err := url.Parse(origin)
++	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
++		return view, errors.New("fixed UPF evidence origin unavailable")
++	}
++	raw, err := read(origin)
++	if err != nil {
++		return view, errors.New("native UPF read unavailable")
++	}
++	var dump struct {
++		Schema     string        `json:"schemaVersion"`
++		Source     string        `json:"source"`
++		Available  bool          `json:"available"`
++		UPF        string        `json:"upf"`
++		Epoch      string        `json:"epoch"`
++		ObservedAt string        `json:"observedAt"`
++		Errors     []interface{} `json:"errors"`
++		Residuals  []interface{} `json:"residuals"`
++		Sessions   []struct {
++			IP       string      `json:"ip"`
++			SEID     interface{} `json:"pfcpSeid"`
++			Evidence string      `json:"evidence"`
++			UPF      string      `json:"upf"`
++		} `json:"sessions"`
++		QERs []struct {
++			SessionNativeQer
++			SEID interface{} `json:"pfcpSeid"`
++		} `json:"qers"`
++		PDRs []struct {
++			ID     uint16      `json:"id"`
++			SEID   interface{} `json:"seid"`
++			QERIDs []uint32    `json:"qerIds"`
++		} `json:"pdrs"`
++	}
++	decoder := json.NewDecoder(strings.NewReader(string(raw)))
++	decoder.UseNumber()
++	if decoder.Decode(&dump) != nil {
++		return view, errors.New("invalid native UPF evidence")
++	}
++	stamp, err := time.Parse(time.RFC3339Nano, dump.ObservedAt)
++	if err != nil || time.Since(stamp) > 15*time.Second || time.Until(stamp) > time.Second || dump.Schema != "cityverse.upf/v1" || dump.Source != "gtp5g-netlink" || !dump.Available || dump.Epoch == "" || dump.Errors == nil || dump.Residuals == nil || dump.Sessions == nil || len(dump.Errors) != 0 || len(dump.Residuals) != 0 {
++		return view, errors.New("native UPF evidence invalid or stale")
++	}
++	seid := strconv.FormatUint(ctx.RemoteSEID, 10)
++	matched := 0
++	for _, s := range dump.Sessions {
++		if fmt.Sprint(s.SEID) == seid && s.IP == sm.PDUAddress.String() && s.Evidence == "kernel-installed-pdr-far" && s.UPF == dump.UPF {
++			matched++
++		}
++	}
++	if matched != 1 {
++		return view, errors.New("native session SEID and address mismatch")
++	}
++	qers := make([]SessionNativeQer, 0)
++	pdrs := map[uint16][]uint32{}
++	for _, p := range dump.PDRs {
++		if fmt.Sprint(p.SEID) == seid {
++			if _, ok := pdrs[p.ID]; ok {
++				return view, errors.New("duplicate PDR")
++			}
++			pdrs[p.ID] = p.QERIDs
++		}
++	}
++	ids := map[uint32]bool{}
++	for _, q := range dump.QERs {
++		if fmt.Sprint(q.SEID) != seid {
++			continue
++		}
++		if ids[q.ID] || len(q.PDRIDs) == 0 || q.Rates.UL > 500000 || q.Rates.DL > 500000 {
++			return view, errors.New("invalid QER")
++		}
++		ids[q.ID] = true
++		expected := []uint16{}
++		for pid, qids := range pdrs {
++			for _, qid := range qids {
++				if qid == q.ID {
++					expected = append(expected, pid)
++				}
++			}
++		}
++		sort.Slice(expected, func(i, j int) bool { return expected[i] < expected[j] })
++		sort.Slice(q.PDRIDs, func(i, j int) bool { return q.PDRIDs[i] < q.PDRIDs[j] })
++		if fmt.Sprint(expected) != fmt.Sprint(q.PDRIDs) {
++			return view, errors.New("QER/PDR references differ")
++		}
++		qers = append(qers, q.SessionNativeQer)
++	}
++	if len(qers) == 0 || len(pdrs) == 0 {
++		return view, errors.New("empty QER/PDR topology")
++	}
++	for _, qids := range pdrs {
++		for _, qid := range qids {
++			if !ids[qid] {
++				return view, errors.New("unresolved PDR QER")
++			}
++		}
++	}
++	sort.Slice(qers, func(i, j int) bool { return qers[i].ID < qers[j].ID })
++	view = SessionQerView{SessionQerIdentity: SessionQerIdentity{Scope: scope, SUPI: sm.Supi, SessionID: sm.PDUSessionID, Epoch: sm.Ref, Ref: sm.Ref, SEID: seid, UPFEpoch: dump.Epoch, SST: sm.SNssai.Sst, SD: sm.SNssai.Sd, DNN: sm.Dnn}, QERs: qers, ObservedAt: float64(stamp.UnixNano()) / 1e9}
++	view.UPFID = upf.UUID()
++	view.NodeIP = ip
++	view.SMFBoot = smf_context.IntentBootEpoch
++	view.CreatedAt = sm.IntentCreatedAt
++	view.Key = canonicalSessionKey(scope, sm.Supi, sm.PDUSessionID, sm.Ref)
++	return view, nil
++}
++
++func (p *Processor) HandleSessionActiveInventory(c *gin.Context) {
++	engine, err := NewNativeSessionQerEngine()
++	if err != nil {
++		c.JSON(503, gin.H{"error": "native session inventory not configured", "complete": false})
++		return
++	}
++	engine.HandleActiveInventory(c)
++}
++
++func (engine *SessionQerEngine) HandleActiveInventory(c *gin.Context) {
++	sessions := []SessionQerView{}
++	var kernelCensus func(map[string]map[string]bool) ([]gin.H, error)
++	if engine.InventoryCensus != nil {
++		engine.Read, kernelCensus = engine.InventoryCensus()
++	}
++	if engine.InventoryReader != nil {
++		if kernelCensus == nil {
++			engine.Read = engine.InventoryReader()
++		}
++	}
++	expected := map[string]map[string]bool{}
++	revision := smf_context.IntentSessionCensusRevision()
++	stamp := intentNow()
++	for _, sm := range smf_context.SMContextSnapshot() {
++		if c.Request.Context().Err() != nil {
++			return
++		}
++		sm.SMLock.Lock()
++		active := sm.State() == smf_context.Active
++		inflight := !active && (sm.SelectedUPF != nil || len(sm.PFCPContext) != 0)
++		ref := sm.Ref
++		sm.SMLock.Unlock()
++		if inflight {
++			c.JSON(409, gin.H{"error": "native session is inflight", "complete": false})
++			return
++		}
++		if !active {
++			continue
++		}
++		view, readErr := engine.View(ref)
++		if readErr != nil {
++			c.JSON(409, gin.H{"error": "native session census changed or independent UPF evidence unavailable", "complete": false})
++			return
++		}
++		sessions = append(sessions, view)
++		if expected[view.NodeIP] == nil {
++			expected[view.NodeIP] = map[string]bool{}
++		}
++		if expected[view.NodeIP][view.SEID] {
++			c.JSON(409, gin.H{"error": "duplicate native session SEID", "complete": false})
++			return
++		}
++		expected[view.NodeIP][view.SEID] = true
++		if view.ObservedAt < stamp {
++			stamp = view.ObservedAt
++		}
++	}
++	upfs := []gin.H{}
++	if kernelCensus != nil {
++		var err error
++		upfs, err = kernelCensus(expected)
++		if err != nil {
++			c.JSON(409, gin.H{"error": "independent full-UPF census disagrees with SMF", "complete": false})
++			return
++		}
++		for _, upf := range upfs {
++			if value, ok := upf["observed_at"].(float64); ok && value < stamp {
++				stamp = value
++			}
++		}
++	}
++	if revision != smf_context.IntentSessionCensusRevision() {
++		c.JSON(409, gin.H{"error": "native session census changed", "complete": false, "census_revision": revision})
++		return
++	}
++	c.JSON(200, gin.H{"source": "native-smf-active-sessions", "complete": true, "census_revision": revision, "network_scope": engine.Scope, "smf_boot_epoch": smf_context.IntentBootEpoch, "observed_at": stamp, "sessions": sessions, "upfs": upfs})
++}
++
++func NewNativeSessionQerEngine() (*SessionQerEngine, error) {
++	scope := strings.TrimSpace(os.Getenv("SMF_SESSION_QER_NETWORK_SCOPE"))
++	state := os.Getenv("SMF_SESSION_QER_STATE_DIR")
++	origins := map[string]string{}
++	if scope == "" || !filepath.IsAbs(state) || json.Unmarshal([]byte(os.Getenv("SMF_SESSION_QER_UPF_ORIGINS")), &origins) != nil || len(origins) == 0 {
++		return nil, errors.New("exact-session actuation is not configured")
++	}
++	engine := &SessionQerEngine{Scope: scope, StateDir: state, Lookup: smf_context.GetSMContextByRef}
++	engine.Read = func(sm *smf_context.SMContext) (SessionQerView, error) {
++		return nativeUPFSessionView(sm, scope, origins)
++	}
++	engine.InventoryReader = func() func(*smf_context.SMContext) (SessionQerView, error) {
++		read := requestNativeUPFReader()
++		return func(sm *smf_context.SMContext) (SessionQerView, error) {
++			return nativeUPFSessionViewWithRead(sm, scope, origins, read)
++		}
++	}
++	engine.InventoryCensus = func() (func(*smf_context.SMContext) (SessionQerView, error), func(map[string]map[string]bool) ([]gin.H, error)) {
++		read := requestNativeUPFReader()
++		return func(sm *smf_context.SMContext) (SessionQerView, error) {
++				return nativeUPFSessionViewWithRead(sm, scope, origins, read)
++			},
++			func(expected map[string]map[string]bool) ([]gin.H, error) {
++				return verifyNativeFullUPFCensus(origins, read, expected)
++			}
++	}
++	engine.Apply = func(sm *smf_context.SMContext, r SessionQerRates) error {
++		result := actuateSMContextQERLocked(sm, "", 0, "", r.UL, r.DL)
++		if result.Status != "applied" {
++			return errors.New("PFCP QER write unresolved")
++		}
++		return nil
++	}
++	return engine, nil
++}
++
++func sessionQerLegacyWriteAllowed(ref string) bool {
++	state := os.Getenv("SMF_SESSION_QER_STATE_DIR")
++	if state == "" {
++		return true
++	}
++	engine := &SessionQerEngine{StateDir: state}
++	record, release, err := engine.journal(ref)
++	if err != nil {
++		return false
++	}
++	defer release()
++	return record.Owner == "" && !record.Pending
++}
++
++func (p *Processor) HandleSessionQerActuation(c *gin.Context) {
++	engine, err := NewNativeSessionQerEngine()
++	if err != nil {
++		c.JSON(503, gin.H{"error": "exact-session actuation not configured"})
++		return
++	}
++	engine.HandleActuation(c)
++}
++func (p *Processor) HandleSessionQerInventory(c *gin.Context) {
++	engine, err := NewNativeSessionQerEngine()
++	if err != nil {
++		c.JSON(503, gin.H{"error": "exact-session inventory not configured"})
++		return
++	}
++	engine.HandleInventory(c)
++}
++func (p *Processor) HandleSessionQerCapability(c *gin.Context) {
++	engine, err := NewNativeSessionQerEngine()
++	if err != nil {
++		c.JSON(503, gin.H{"verified": false, "selector": "exact-pdu-session", "compare_and_swap": false})
++		return
++	}
++	c.JSON(200, gin.H{"verified": true, "selector": "exact-pdu-session", "compare_and_swap": true, "source": "smf-session-qer/v1", "network_scope": engine.Scope})
++}
+diff --git a/internal/sbi/processor/oam_session_qer_test.go b/internal/sbi/processor/oam_session_qer_test.go
+new file mode 100644
+index 0000000..802342e
+--- /dev/null
++++ b/internal/sbi/processor/oam_session_qer_test.go
+@@ -0,0 +1,260 @@
++package processor
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/free5gc/openapi/models"
++	smf_context "github.com/free5gc/smf/internal/context"
++	"github.com/gin-gonic/gin"
++	"github.com/sirupsen/logrus"
++)
++
++func TestNativeUPFDumpCacheIsRequestScopedAndBounded(t *testing.T) {
++	requests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests++
++		w.Write([]byte(`{"observedAt":"original-clock","sessions":[]}`))
++	}))
++	defer server.Close()
++	read := requestNativeUPFReader()
++	for i := 0; i < 500; i++ {
++		raw, err := read(server.URL)
++		if err != nil || !bytes.Contains(raw, []byte("original-clock")) {
++			t.Fatal("native dump altered", err)
++		}
++	}
++	if requests != 1 {
++		t.Fatal("one UPF fetched more than once in one census", requests)
++	}
++	if _, err := requestNativeUPFReader()(server.URL); err != nil {
++		t.Fatal(err)
++	}
++	if requests != 2 {
++		t.Fatal("new request reused old evidence")
++	}
++}
++
++func sessionTestEngine(t *testing.T) (*SessionQerEngine, map[string]SessionQerView, *int) {
++	t.Helper()
++	views := map[string]SessionQerView{}
++	contexts := map[string]*smf_context.SMContext{}
++	writes := 0
++	for i, ref := range []string{"session-one", "session-two"} {
++		sm := &smf_context.SMContext{Ref: ref, PDUSessionID: int32(i + 1), SmfPduSessionSmContextCreateData: &models.SmfPduSessionSmContextCreateData{Supi: "imsi-001010000000001"}, Log: logrus.NewEntry(logrus.New())}
++		sm.SetState(smf_context.Active)
++		contexts[ref] = sm
++		id := SessionQerIdentity{Scope: "city", SUPI: sm.Supi, SessionID: sm.PDUSessionID, Epoch: ref, Ref: ref, SEID: ref, UPFEpoch: "upf-epoch", SST: 1, SD: "000001", DNN: "internet"}
++		id.Key = canonicalSessionKey(id.Scope, id.SUPI, id.SessionID, id.Epoch)
++		views[ref] = SessionQerView{SessionQerIdentity: id, QERs: []SessionNativeQer{{ID: 1, PDRIDs: []uint16{1, 2}, Rates: SessionQerRates{50, 50}}, {ID: 2, PDRIDs: []uint16{3}, Rates: SessionQerRates{0, 0}}}, ObservedAt: float64(time.Now().UnixNano()) / 1e9}
++	}
++	state := t.TempDir()
++	if err := os.Chmod(state, 0700); err != nil {
++		t.Fatal(err)
++	}
++	engine := &SessionQerEngine{Scope: "city", StateDir: state, Lookup: func(ref string) *smf_context.SMContext { return contexts[ref] }, Read: func(sm *smf_context.SMContext) (SessionQerView, error) { return views[sm.Ref], nil }, Apply: func(sm *smf_context.SMContext, r SessionQerRates) error {
++		writes++
++		view := views[sm.Ref]
++		view.QERs = append([]SessionNativeQer{}, view.QERs...)
++		view.QERs[0].Rates = r
++		views[sm.Ref] = view
++		return nil
++	}}
++	return engine, views, &writes
++}
++func requestFor(t *testing.T, e *SessionQerEngine, ref string) SessionQerRequest {
++	t.Helper()
++	v, err := e.View(ref)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return SessionQerRequest{Identity: v.SessionQerIdentity, Rates: SessionQerRates{100, 100}, Owner: "policy-video", Operation: "op-1", Expected: v.Version, Phase: "apply"}
++}
++
++func TestSessionQerSameSUPITwoPDUSessions(t *testing.T) {
++	e, views, writes := sessionTestEngine(t)
++	request := requestFor(t, e, "session-one")
++	before := views["session-two"]
++	after, err := e.Actuate(request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if after.QERs[0].Rates.UL != 100 || views["session-two"].QERs[0].Rates != before.QERs[0].Rates || *writes != 1 {
++		t.Fatal("wrong session was changed")
++	}
++	if after.QERs[1].Rates != (SessionQerRates{}) {
++		t.Fatal("unrelated QER changed")
++	}
++}
++func TestSessionQerVersionAndOwnerFences(t *testing.T) {
++	e, _, writes := sessionTestEngine(t)
++	request := requestFor(t, e, "session-one")
++	after, err := e.Actuate(request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = e.Actuate(request); err == nil {
++		t.Fatal("stale version accepted")
++	}
++	request.Expected = after.Version
++	request.Owner = "other-owner"
++	if _, err = e.Actuate(request); err == nil {
++		t.Fatal("foreign owner accepted")
++	}
++	if *writes != 1 {
++		t.Fatal("rejected request wrote native state")
++	}
++}
++func TestSessionQerExactIdentityAndRestore(t *testing.T) {
++	e, _, writes := sessionTestEngine(t)
++	request := requestFor(t, e, "session-one")
++	wrong := request
++	wrong.Identity.UPFEpoch = "rebooted"
++	if _, err := e.Actuate(wrong); err == nil {
++		t.Fatal("wrong epoch accepted")
++	}
++	after, err := e.Actuate(request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	restore := request
++	restore.Expected = after.Version
++	restore.Phase = "restore"
++	restore.Rates = SessionQerRates{50, 50}
++	restore.Restore = &sessionQerMetadata{}
++	restore.Operation = "foreign-operation"
++	if _, err = e.Actuate(restore); err == nil {
++		t.Fatal("foreign restoration accepted")
++	}
++	restore.Operation = request.Operation
++	restored, err := e.Actuate(restore)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if restored.Owner != "" || restored.Operation != "" || restored.QERs[0].Rates != (SessionQerRates{50, 50}) || *writes != 2 {
++		t.Fatal("baseline not restored")
++	}
++}
++func TestSessionQerJournalSurvivesNewEngine(t *testing.T) {
++	e, _, _ := sessionTestEngine(t)
++	request := requestFor(t, e, "session-one")
++	after, err := e.Actuate(request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	other := *e
++	view, err := other.View("session-one")
++	if err != nil || view.Version != after.Version || view.Owner != request.Owner {
++		t.Fatal("durable owner state was lost")
++	}
++}
++func TestSessionQerUncertainOutcomeCannotBeReplayed(t *testing.T) {
++	e, _, writes := sessionTestEngine(t)
++	request := requestFor(t, e, "session-one")
++	e.Apply = func(*smf_context.SMContext, SessionQerRates) error { *writes++; return errors.New("unknown response") }
++	if _, err := e.Actuate(request); err == nil {
++		t.Fatal("unknown outcome passed")
++	}
++	current, err := e.View("session-one")
++	if err != nil {
++		t.Fatal(err)
++	}
++	request.Expected = current.Version
++	if _, err = e.Actuate(request); err == nil || *writes != 1 {
++		t.Fatal("ambiguous write replayed")
++	}
++}
++func TestSessionQerHTTPRejectsUnknownFieldsAndInventoryDuplicates(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	e, _, writes := sessionTestEngine(t)
++	router := gin.New()
++	router.POST("/write", e.HandleActuation)
++	router.POST("/read", e.HandleInventory)
++	request := requestFor(t, e, "session-one")
++	body, _ := json.Marshal(request)
++	body = append(body[:len(body)-1], []byte(",\"unexpected\":true}")...)
++	response := httptest.NewRecorder()
++	router.ServeHTTP(response, httptest.NewRequest("POST", "/write", bytes.NewReader(body)))
++	if response.Code != 400 || *writes != 0 {
++		t.Fatal("unknown field accepted")
++	}
++	body, _ = json.Marshal(map[string]interface{}{"session_keys": []string{request.Identity.Key, request.Identity.Key}})
++	response = httptest.NewRecorder()
++	router.ServeHTTP(response, httptest.NewRequest("POST", "/read", bytes.NewReader(body)))
++	if response.Code != 400 {
++		t.Fatal("duplicate session key accepted")
++	}
++}
++
++func TestSessionQerSharedPolicyFinalReleaseUsesOriginalBaseline(t *testing.T) {
++	e, _, _ := sessionTestEngine(t)
++	for i, rate := range []uint64{100, 150, 100} {
++		r := requestFor(t, e, "session-one")
++		r.Operation = string(rune('a' + i))
++		r.Rates = SessionQerRates{rate, rate}
++		if _, err := e.Actuate(r); err != nil {
++			t.Fatal(err)
++		}
++	}
++	latest, err := e.View("session-one")
++	if err != nil {
++		t.Fatal(err)
++	}
++	r := SessionQerRequest{Identity: latest.SessionQerIdentity, Rates: SessionQerRates{50, 50}, Owner: latest.Owner, Operation: latest.Operation, Expected: latest.Version, Phase: "restore", Restore: &sessionQerMetadata{}}
++	restored, err := e.Actuate(r)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if restored.Owner != "" || restored.QERs[0].Rates.UL != 50 {
++		t.Fatal("original ownership baseline not restored")
++	}
++}
++
++func TestSessionQerFailedSecondOperationRestoresPredecessorThenOriginal(t *testing.T) {
++	e, _, _ := sessionTestEngine(t)
++	first := requestFor(t, e, "session-one")
++	if _, err := e.Actuate(first); err != nil {
++		t.Fatal(err)
++	}
++	originalApply := e.Apply
++	e.Apply = func(sm *smf_context.SMContext, r SessionQerRates) error {
++		originalApply(sm, r)
++		return errors.New("ambiguous acknowledgement")
++	}
++	second := requestFor(t, e, "session-one")
++	second.Operation = "second"
++	second.Rates = SessionQerRates{150, 150}
++	if _, err := e.Actuate(second); err == nil {
++		t.Fatal("ambiguous second write passed")
++	}
++	e.Apply = originalApply
++	current, err := e.View("session-one")
++	if err != nil {
++		t.Fatal(err)
++	}
++	rollback := SessionQerRequest{Identity: current.SessionQerIdentity, Rates: SessionQerRates{100, 100}, Owner: second.Owner, Operation: second.Operation, Expected: current.Version, Phase: "restore", Restore: &sessionQerMetadata{first.Owner, first.Operation}}
++	previous, err := e.Actuate(rollback)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if previous.Operation != first.Operation || previous.QERs[0].Rates.UL != 100 {
++		t.Fatal("predecessor was not restored")
++	}
++	rollback.Expected = previous.Version
++	rollback.Operation = previous.Operation
++	rollback.Rates = SessionQerRates{50, 50}
++	rollback.Restore = &sessionQerMetadata{}
++	final, err := e.Actuate(rollback)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if final.Owner != "" || final.QERs[0].Rates.UL != 50 {
++		t.Fatal("original baseline lost after failed predecessor")
++	}
++}
+diff --git a/internal/sbi/processor/oam_upf_control.go b/internal/sbi/processor/oam_upf_control.go
+new file mode 100644
+index 0000000..b7e3e08
+--- /dev/null
++++ b/internal/sbi/processor/oam_upf_control.go
+@@ -0,0 +1,402 @@
++package processor
++
++import (
++	"encoding/json"
++	"errors"
++	"net/http"
++	"os"
++	"time"
++
++	smf_context "github.com/free5gc/smf/internal/context"
++	"github.com/free5gc/smf/pkg/factory"
++	"github.com/gin-gonic/gin"
++)
++
++type intentUPFCommand struct {
++	Target    string `json:"targetId"`
++	Owner     string `json:"ownerId"`
++	Operation string `json:"operationId"`
++	Expected  string `json:"expectedVersion"`
++	Accepting bool   `json:"accepting"`
++}
++type intentUPFTemplate struct {
++	Node   *factory.UPNode `json:"node"`
++	LinkTo []string        `json:"linkTo"`
++}
++
++func intentUPFTemplates() map[string]intentUPFTemplate {
++	templates := map[string]intentUPFTemplate{}
++	if json.Unmarshal([]byte(os.Getenv("SMF_DYNAMIC_UPF_TEMPLATES")), &templates) != nil {
++		return nil
++	}
++	return templates
++}
++func intentNow() float64 { return float64(time.Now().UnixNano()) / 1e9 }
++func intentControlReady() bool {
++	_, err := smf_context.IntentStateDir()
++	return err == nil && os.Getenv("SMF_SESSION_QER_NETWORK_SCOPE") != "" && !smf_context.GetSelf().ULCLSupport
++}
++func intentCommandValid(r intentUPFCommand) bool {
++	return r.Target != "" && r.Owner != "" && len(r.Owner) <= 256 && r.Operation != "" && len(r.Operation) <= 256 && r.Expected != ""
++}
++
++func intentUPFView(target string) (gin.H, error) {
++	censusRevision := smf_context.IntentSessionCensusRevision()
++	upi := smf_context.GetUserPlaneInformation()
++	upi.Mu.RLock()
++	node := upi.UPFs[target]
++	id := ""
++	if node != nil {
++		id = node.UPF.UUID()
++	}
++	smf_context.IntentControlMu.Lock()
++	state, err := smf_context.IntentUPFStateLocked(target)
++	smf_context.IntentControlMu.Unlock()
++	upi.Mu.RUnlock()
++	if err != nil {
++		return nil, err
++	}
++	active, seids, inflight := []string{}, []string{}, []string{}
++	associated := false
++	ip := ""
++	details := []gin.H{}
++	if node != nil {
++		active, seids, inflight = smf_context.IntentUPFSessions(node)
++		associated = node.UPF.IsAssociated() == nil
++		ip = node.NodeID.ResolveNodeIdToIp().String()
++		for _, sm := range smf_context.SMContextSnapshot() {
++			sm.SMLock.Lock()
++			ctx := sm.PFCPContext[ip]
++			if ctx != nil && ctx.RemoteSEID != 0 && sm.SNssai != nil {
++				key, _ := json.Marshal([]interface{}{os.Getenv("SMF_SESSION_QER_NETWORK_SCOPE"), sm.Supi, sm.PDUSessionID, sm.Ref})
++				details = append(details, gin.H{"session_key": string(key), "networkScope": os.Getenv("SMF_SESSION_QER_NETWORK_SCOPE"), "supi": sm.Supi, "sessionId": sm.PDUSessionID, "smContextRef": sm.Ref, "establishedEpoch": sm.Ref, "sst": sm.SNssai.Sst, "sd": sm.SNssai.Sd, "dnn": sm.Dnn, "upf_id": id, "pfcpSeid": ctx.RemoteSEID, "created_at": sm.IntentCreatedAt})
++			}
++			sm.SMLock.Unlock()
++		}
++	}
++	complete := len(details) == len(active)
++	keys := map[string]bool{}
++	for _, detail := range details {
++		keys[detail["session_key"].(string)] = true
++	}
++	for _, key := range active {
++		complete = complete && keys[key]
++	}
++	upi.Mu.RLock()
++	smf_context.IntentControlMu.Lock()
++	fresh, stateErr := smf_context.IntentUPFStateLocked(target)
++	unchanged := upi.UPFs[target] == node && stateErr == nil && fresh == state
++	smf_context.IntentControlMu.Unlock()
++	upi.Mu.RUnlock()
++	if !unchanged {
++		return nil, errors.New("UPF topology or ownership changed during census")
++	}
++	complete = complete && censusRevision == smf_context.IntentSessionCensusRevision()
++	return gin.H{"source": "native-smf-upf/v1", "observed_at": intentNow(), "boot_epoch": smf_context.IntentBootEpoch, "smf_boot_epoch": smf_context.IntentBootEpoch, "target_id": target, "target_upf_id": id, "node_ip": ip, "registered": node != nil, "owner_id": state.Owner, "operation_id": state.Operation, "accepting": state.Accepting, "version": smf_context.IntentUPFVersion(state, id), "pfcp_associated": associated, "active_session_keys": active, "active_pfcp_seids": seids, "inflight_session_keys": inflight, "sessions": details, "complete": complete, "census_revision": censusRevision}, nil
++}
++func (p *Processor) HandleIntentUPFRead(c *gin.Context) {
++	var r struct {
++		Target string `json:"targetId"`
++	}
++	if !decodeSessionBody(c, &r) {
++		return
++	}
++	if !intentControlReady() || r.Target == "" {
++		c.JSON(503, gin.H{"error": "native UPF control unavailable"})
++		return
++	}
++	view, err := intentUPFView(r.Target)
++	if err != nil {
++		c.JSON(409, gin.H{"error": "native UPF read unavailable"})
++		return
++	}
++	c.JSON(200, view)
++}
++func (p *Processor) HandleIntentUPFCapability(c *gin.Context) {
++	ready := intentControlReady()
++	c.JSON(200, gin.H{"source": "native-smf-upf/v1", "observed_at": intentNow(), "verified": ready, "compare_and_swap": ready, "register": ready && len(intentUPFTemplates()) > 0, "selection": ready, "session_admissions": ready, "drain": ready, "session_migration": false, "boot_epoch": smf_context.IntentBootEpoch})
++}
++
++func (p *Processor) HandleIntentUPFSelection(c *gin.Context) {
++	var r intentUPFCommand
++	if !decodeSessionBody(c, &r) {
++		return
++	}
++	if !intentControlReady() || !intentCommandValid(r) {
++		c.JSON(400, gin.H{"error": "invalid UPF selection command"})
++		return
++	}
++	upi := smf_context.GetUserPlaneInformation()
++	upi.Mu.RLock()
++	node := upi.UPFs[r.Target]
++	smf_context.IntentControlMu.Lock()
++	state, err := smf_context.IntentUPFStateLocked(r.Target)
++	if err == nil && node != nil && r.Expected == smf_context.IntentUPFVersion(state, node.UPF.UUID()) && (state.Owner == "" || state.Owner == r.Owner) {
++		if !r.Accepting || node.UPF.IsAssociated() == nil {
++			state.Owner = r.Owner
++			state.Operation = r.Operation
++			state.Accepting = r.Accepting
++			state.Revision++
++			err = smf_context.IntentSaveUPFStateLocked(state)
++		} else {
++			err = errors.New("UPF not associated")
++		}
++	} else {
++		err = errors.New("UPF owner or version changed")
++	}
++	smf_context.IntentControlMu.Unlock()
++	upi.Mu.RUnlock()
++	if err != nil {
++		c.JSON(409, gin.H{"error": "UPF selection precondition failed"})
++		return
++	}
++	view, err := intentUPFView(r.Target)
++	if err != nil {
++		c.JSON(409, gin.H{"error": "UPF readback unavailable"})
++		return
++	}
++	c.JSON(200, view)
++}
++
++func (p *Processor) HandleIntentUPFRegister(c *gin.Context) {
++	var r intentUPFCommand
++	if !decodeSessionBody(c, &r) {
++		return
++	}
++	template, allowed := intentUPFTemplates()[r.Target]
++	if !intentControlReady() || !intentCommandValid(r) || !allowed {
++		c.JSON(400, gin.H{"error": "pinned UPF registration required"})
++		return
++	}
++	upi := smf_context.GetUserPlaneInformation()
++	upi.Mu.Lock()
++	smf_context.IntentControlMu.Lock()
++	state, err := smf_context.IntentUPFStateLocked(r.Target)
++	if err == nil && upi.UPNodes[r.Target] == nil && smf_context.IntentUPFRegistrationOwnerAllowed(state, r.Owner, r.Expected) && (r.Expected == smf_context.IntentUPFVersion(state, "") || (r.Expected == "absent" && state.Revision == 0)) {
++		err = smf_context.ValidateIntentUPFTemplate(upi, template.Node, template.LinkTo)
++	} else {
++		err = errors.New("UPF registration owner or version changed")
++	}
++	var node *smf_context.UPNode
++	if err == nil {
++		state.Owner = r.Owner
++		state.Operation = r.Operation
++		state.Accepting = false
++		state.Managed = true
++		state.Removed = false
++		state.Revision++
++		err = smf_context.IntentSaveUPFStateLocked(state)
++	}
++	if err == nil {
++		topology := &factory.UserPlaneInformation{UPNodes: map[string]*factory.UPNode{r.Target: template.Node}, Links: []*factory.UPLink{}}
++		for _, link := range template.LinkTo {
++			topology.Links = append(topology.Links, &factory.UPLink{A: link, B: r.Target})
++		}
++		upi.UpNodesFromConfiguration(topology)
++		node = upi.UPFs[r.Target]
++		if node != nil {
++			node.Name = r.Target
++			node.UPF.Addr = template.Node.Addr
++			upi.LinksFromConfiguration(topology)
++		} else {
++			err = errors.New("UPF native registration failed")
++		}
++	}
++	smf_context.IntentControlMu.Unlock()
++	upi.Mu.Unlock()
++	if err != nil {
++		c.JSON(409, gin.H{"error": "UPF registration unresolved"})
++		return
++	}
++	go p.ToBeAssociatedWithUPF(smf_context.GetSelf().PfcpContext, node.UPF)
++	view, readErr := intentUPFView(r.Target)
++	if readErr != nil {
++		c.JSON(409, gin.H{"error": "UPF readback unavailable"})
++		return
++	}
++	c.JSON(http.StatusOK, view)
++}
++
++func (p *Processor) HandleIntentUPFUnregister(c *gin.Context) {
++	var r intentUPFCommand
++	if !decodeSessionBody(c, &r) {
++		return
++	}
++	if !intentControlReady() || !intentCommandValid(r) {
++		c.JSON(400, gin.H{"error": "invalid UPF removal command"})
++		return
++	}
++	upi := smf_context.GetUserPlaneInformation()
++	upi.Mu.Lock()
++	node := upi.UPFs[r.Target]
++	smf_context.IntentControlMu.Lock()
++	state, err := smf_context.IntentUPFStateLocked(r.Target)
++	smf_context.IntentControlMu.Unlock()
++	upi.Mu.Unlock()
++	if err == nil && node != nil && state.Managed && !state.Accepting && state.Owner == r.Owner && state.Operation == r.Operation && r.Expected == smf_context.IntentUPFVersion(state, node.UPF.UUID()) {
++		active, seids, inflight := smf_context.IntentUPFSessions(node)
++		if len(active)+len(seids)+len(inflight) != 0 {
++			err = errors.New("UPF has active or inflight sessions")
++		}
++	} else {
++		err = errors.New("UPF removal owner or version changed")
++	}
++	upi.Mu.Lock()
++	if upi.UPFs[r.Target] != node {
++		err = errors.New("UPF topology changed during drain census")
++	}
++	if err == nil {
++		smf_context.IntentControlMu.Lock()
++		fresh, readErr := smf_context.IntentUPFStateLocked(r.Target)
++		if readErr != nil || fresh != state {
++			err = errors.New("UPF selection changed")
++		} else {
++			state.Removed = true
++			state.Revision++
++			err = smf_context.IntentSaveUPFStateLocked(state)
++			if err == nil {
++				if node.UPF.CancelAssociation != nil {
++					node.UPF.CancelAssociation()
++				}
++				upi.UpNodeDelete(r.Target)
++			}
++		}
++		smf_context.IntentControlMu.Unlock()
++	}
++	upi.Mu.Unlock()
++	if err != nil {
++		c.JSON(409, gin.H{"error": "UPF drain or owner precondition failed"})
++		return
++	}
++	view, err := intentUPFView(r.Target)
++	if err != nil {
++		c.JSON(409, gin.H{"error": "UPF removal readback unavailable"})
++		return
++	}
++	c.JSON(200, view)
++}
++
++type intentAdmissionRequest struct {
++	Scope      string  `json:"networkScope"`
++	SUPI       string  `json:"supi"`
++	SessionID  int32   `json:"pduSessionId"`
++	Nonce      string  `json:"nonce"`
++	Owner      string  `json:"ownerId"`
++	Operation  string  `json:"operationId"`
++	Expected   string  `json:"expectedVersion"`
++	TargetUPF  string  `json:"targetUpfId"`
++	ValidFrom  float64 `json:"validFrom"`
++	ValidUntil float64 `json:"validUntil"`
++}
++
++func admissionResponse(a smf_context.IntentAdmission) gin.H {
++	raw, _ := json.Marshal(a)
++	out := gin.H{}
++	json.Unmarshal(raw, &out)
++	out["source"] = "native-smf-session-admission/v1"
++	out["observed_at"] = intentNow()
++	out["version"] = smf_context.IntentAdmissionVersion(a)
++	return out
++}
++func (p *Processor) HandleIntentAdmissionRegister(c *gin.Context) {
++	var r intentAdmissionRequest
++	if !decodeSessionBody(c, &r) {
++		return
++	}
++	if !intentControlReady() {
++		c.JSON(503, gin.H{"error": "native session admissions unavailable"})
++		return
++	}
++	upi := smf_context.GetUserPlaneInformation()
++	upi.Mu.RLock()
++	eligible := false
++	for _, node := range upi.UPFs {
++		if node.UPF.UUID() == r.TargetUPF && node.UPF.IsAssociated() == nil {
++			eligible = true
++		}
++	}
++	smf_context.IntentControlMu.Lock()
++	var result smf_context.IntentAdmission
++	var err error
++	if eligible {
++		result, err = smf_context.IntentRegisterAdmissionLocked(smf_context.IntentAdmission{Scope: r.Scope, SUPI: r.SUPI, SessionID: r.SessionID, Nonce: r.Nonce, Owner: r.Owner, Operation: r.Operation, TargetUPF: r.TargetUPF, ValidFrom: r.ValidFrom, ValidUntil: r.ValidUntil}, r.Expected)
++	} else {
++		err = errors.New("UPF is not registered or PFCP associated")
++	}
++	smf_context.IntentControlMu.Unlock()
++	upi.Mu.RUnlock()
++	if err != nil {
++		c.JSON(409, gin.H{"error": "session admission precondition failed"})
++		return
++	}
++	c.JSON(200, admissionResponse(result))
++}
++func (p *Processor) HandleIntentAdmissionRead(c *gin.Context) {
++	nonce := c.Param("nonce")
++	smf_context.IntentControlMu.Lock()
++	a, err := smf_context.IntentLoadAdmissionLocked(nonce)
++	smf_context.IntentControlMu.Unlock()
++	if errors.Is(err, smf_context.ErrIntentAdmissionAbsent) {
++		c.JSON(http.StatusNotFound, gin.H{"error": "native admission not found"})
++		return
++	}
++	if err != nil || a.BootEpoch != smf_context.IntentBootEpoch {
++		c.JSON(409, gin.H{"error": "native admission unavailable or SMF boot changed"})
++		return
++	}
++	if a.Binding != nil && a.Status != "cancelled" {
++		sm := smf_context.GetSMContextByRef(a.Binding.Ref)
++		if sm == nil {
++			c.JSON(409, gin.H{"error": "bound native session disappeared"})
++			return
++		}
++		sm.SMLock.Lock()
++		ctx := sm.PFCPContext[a.Binding.NodeIP]
++		active := sm.State() == smf_context.Active && sm.SelectedUPF != nil && sm.SelectedUPF.UPF.UUID() == a.TargetUPF && ctx != nil && ctx.RemoteSEID != 0
++		sm.SMLock.Unlock()
++		if active && a.Status == "selected" {
++			smf_context.IntentControlMu.Lock()
++			current, readErr := smf_context.IntentLoadAdmissionLocked(nonce)
++			if readErr == nil && smf_context.IntentAdmissionVersion(current) == smf_context.IntentAdmissionVersion(a) {
++				a.Status = "bound"
++				a.Revision++
++				err = smf_context.IntentSaveAdmissionLocked(a)
++			} else {
++				err = errors.New("admission changed")
++			}
++			smf_context.IntentControlMu.Unlock()
++			if err != nil {
++				c.JSON(409, gin.H{"error": "admission binding changed"})
++				return
++			}
++		} else if !active && a.Status == "bound" {
++			c.JSON(409, gin.H{"error": "native session no longer active"})
++			return
++		}
++	}
++	c.JSON(200, admissionResponse(a))
++}
++func (p *Processor) HandleIntentAdmissionRelease(c *gin.Context) {
++	var r struct {
++		Owner     string `json:"ownerId"`
++		Operation string `json:"operationId"`
++		Expected  string `json:"expectedVersion"`
++	}
++	if !decodeSessionBody(c, &r) {
++		return
++	}
++	smf_context.IntentControlMu.Lock()
++	defer smf_context.IntentControlMu.Unlock()
++	a, err := smf_context.IntentLoadAdmissionLocked(c.Param("nonce"))
++	if err != nil || a.Owner != r.Owner || a.Operation != r.Operation || smf_context.IntentAdmissionVersion(a) != r.Expected {
++		c.JSON(409, gin.H{"error": "admission release owner or version changed"})
++		return
++	}
++	a.Status = "cancelled"
++	a.Revision++
++	if smf_context.IntentSaveAdmissionLocked(a) != nil {
++		c.JSON(409, gin.H{"error": "admission release journal unresolved"})
++		return
++	}
++	c.JSON(200, admissionResponse(a))
++}
+diff --git a/internal/sbi/processor/oam_upf_control_test.go b/internal/sbi/processor/oam_upf_control_test.go
+new file mode 100644
+index 0000000..8403a07
+--- /dev/null
++++ b/internal/sbi/processor/oam_upf_control_test.go
+@@ -0,0 +1,320 @@
++package processor
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/pfcp/pfcpType"
++	smf_context "github.com/free5gc/smf/internal/context"
++	"github.com/free5gc/util/idgenerator"
++	"github.com/gin-gonic/gin"
++)
++
++func TestIntentAdmissionReleaseOwnerCASAndReadback(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("SMF_SESSION_QER_STATE_DIR", dir)
++	t.Setenv("SMF_SESSION_QER_NETWORK_SCOPE", "city")
++	now := float64(time.Now().UnixNano()) / 1e9
++	a := smf_context.IntentAdmission{Scope: "city", SUPI: "imsi-001010000000099", SessionID: 1, Nonce: "release-test", Owner: "intent", Operation: "operation", TargetUPF: "upf-native", ValidFrom: now - 1, ValidUntil: now + 60}
++	smf_context.IntentControlMu.Lock()
++	a, err := smf_context.IntentRegisterAdmissionLocked(a, "absent")
++	smf_context.IntentControlMu.Unlock()
++	if err != nil {
++		t.Fatal(err)
++	}
++	version := smf_context.IntentAdmissionVersion(a)
++	p := &Processor{}
++	release := func(owner, expected string) *httptest.ResponseRecorder {
++		body, _ := json.Marshal(map[string]string{"ownerId": owner, "operationId": "operation", "expectedVersion": expected})
++		out := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(out)
++		c.Request = httptest.NewRequest("POST", "/session-admissions/release-test/release", bytes.NewReader(body))
++		c.Params = gin.Params{{Key: "nonce", Value: a.Nonce}}
++		p.HandleIntentAdmissionRelease(c)
++		return out
++	}
++	if out := release("foreign", version); out.Code != 409 {
++		t.Fatal("foreign owner cancelled admission", out.Code)
++	}
++	if out := release(a.Owner, "stale"); out.Code != 409 {
++		t.Fatal("stale CAS cancelled admission", out.Code)
++	}
++	out := release(a.Owner, version)
++	if out.Code != 200 {
++		t.Fatal(out.Code, out.Body.String())
++	}
++	var response map[string]interface{}
++	if err = json.Unmarshal(out.Body.Bytes(), &response); err != nil {
++		t.Fatal(err)
++	}
++	if response["status"] != "cancelled" || response["source"] != "native-smf-session-admission/v1" || response["installation_version"] != a.InstallationVersion || response["version"] == version {
++		t.Fatal("invalid immutable installation/CAS proof", response)
++	}
++	if out = release(a.Owner, version); out.Code != 409 {
++		t.Fatal("stale release replay accepted")
++	}
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Params = gin.Params{{Key: "nonce", Value: a.Nonce}}
++	p.HandleIntentAdmissionRead(c)
++	if c.Writer.Status() != 200 {
++		t.Fatal("cancelled record no longer readable")
++	}
++}
++
++func TestIntentUPFViewNeverHoldsTopologyLockWhileWaitingForSession(t *testing.T) {
++	exerciseIntentCensusLockOrder(t, false)
++}
++
++func TestIntentUPFUnregisterNeverHoldsTopologyLockWhileWaitingForSession(t *testing.T) {
++	exerciseIntentCensusLockOrder(t, true)
++}
++
++func exerciseIntentCensusLockOrder(t *testing.T, remove bool) {
++	dir := t.TempDir()
++	if err := os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("SMF_SESSION_QER_STATE_DIR", dir)
++	t.Setenv("SMF_SESSION_QER_NETWORK_SCOPE", "city")
++	old := smf_context.GetSelf().UserPlaneInformation
++	defer func() { smf_context.GetSelf().UserPlaneInformation = old }()
++	id := pfcpType.NodeID{NodeIdType: pfcpType.NodeIdTypeIpv4Address, IP: net.ParseIP("198.18.0.1").To4()}
++	node := &smf_context.UPNode{Name: "lock-test", NodeID: id, UPF: smf_context.NewUPF(&id, nil)}
++	upi := &smf_context.UserPlaneInformation{UPFs: map[string]*smf_context.UPNode{"lock-test": node}}
++	smf_context.GetSelf().UserPlaneInformation = upi
++	oldTEID := smf_context.TeidGenerator
++	smf_context.TeidGenerator = idgenerator.NewGenerator(1, 1000)
++	defer func() { smf_context.TeidGenerator = oldTEID }()
++	sm := smf_context.NewSMContext("imsi-001010000000098", 1)
++	sm.SmfPduSessionSmContextCreateData = &models.SmfPduSessionSmContextCreateData{Supi: "imsi-001010000000098"}
++	defer smf_context.RemoveSMContext(sm.Ref)
++	state := smf_context.IntentUPFState{Target: "lock-test", Owner: "intent", Operation: "operation", Managed: true, Accepting: false, Revision: 1}
++	smf_context.IntentControlMu.Lock()
++	err := smf_context.IntentSaveUPFStateLocked(state)
++	smf_context.IntentControlMu.Unlock()
++	if err != nil {
++		t.Fatal(err)
++	}
++	sm.SMLock.Lock()
++	done := make(chan error, 1)
++	go func() {
++		if !remove {
++			_, err := intentUPFView("lock-test")
++			done <- err
++			return
++		}
++		body, _ := json.Marshal(intentUPFCommand{Target: "lock-test", Owner: "intent", Operation: "operation", Expected: smf_context.IntentUPFVersion(state, node.UPF.UUID())})
++		out := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(out)
++		c.Request = httptest.NewRequest("POST", "/upf-control/unregister", bytes.NewReader(body))
++		(&Processor{}).HandleIntentUPFUnregister(c)
++		if out.Code != 200 {
++			done <- fmt.Errorf("unregister status %d: %s", out.Code, out.Body.String())
++		} else {
++			done <- nil
++		}
++	}()
++	// The reader must release topology before blocking on the already-held session.
++	time.Sleep(25 * time.Millisecond)
++	writer := make(chan struct{})
++	go func() { upi.Mu.Lock(); upi.Mu.Unlock(); close(writer) }()
++	select {
++	case <-writer:
++	case <-time.After(time.Second):
++		sm.SMLock.Unlock()
++		<-writer
++		<-done
++		t.Fatal("topology writer blocked behind reader waiting for session lock")
++	}
++	// Match the production create order: session lock, then topology lock.
++	upi.Mu.RLock()
++	upi.Mu.RUnlock()
++	sm.SMLock.Unlock()
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("native census deadlocked")
++	}
++}
++
++func TestIntentAdmissionSelectedProofIsNotBound(t *testing.T) {
++	now := float64(time.Now().UnixNano()) / 1e9
++	a := smf_context.IntentAdmission{Nonce: "selected", Status: "selected", InstallationVersion: "installed", RegisteredAt: now, Binding: &smf_context.IntentSessionBinding{Ref: "real-ref", Epoch: "real-ref", Key: `["city","imsi-1",1,"real-ref"]`, CreatedAt: now, UPFID: "native-upf", NodeIP: "198.18.0.1", InstallationVersion: "installed"}}
++	proof := admissionResponse(a)
++	if proof["status"] != "selected" || proof["installation_version"] != "installed" || proof["source"] != "native-smf-session-admission/v1" {
++		t.Fatal("wrong admission wire proof")
++	}
++	binding := proof["binding"].(map[string]interface{})
++	if binding["installation_version"] != "installed" || binding["establishedEpoch"] != "real-ref" {
++		t.Fatal("binding lost installation lineage")
++	}
++}
++
++func TestNativeActiveInventoryRejectsConcurrentPoolOrStateChurn(t *testing.T) {
++	for _, mode := range []string{"add", "state", "remove"} {
++		t.Run(mode, func(t *testing.T) {
++			dir := t.TempDir()
++			if err := os.Chmod(dir, 0700); err != nil {
++				t.Fatal(err)
++			}
++			oldTEID := smf_context.TeidGenerator
++			smf_context.TeidGenerator = idgenerator.NewGenerator(1, 1000)
++			t.Cleanup(func() { smf_context.TeidGenerator = oldTEID })
++			create := func(id int32) *smf_context.SMContext {
++				sm := smf_context.NewSMContext("imsi-001010000000097", id)
++				sm.SmfPduSessionSmContextCreateData = &models.SmfPduSessionSmContextCreateData{Supi: "imsi-001010000000097"}
++				t.Cleanup(func() { smf_context.RemoveSMContext(sm.Ref) })
++				return sm
++			}
++			first, other := create(1), create(2)
++			first.SetState(smf_context.Active)
++			entered, changed := make(chan struct{}), make(chan struct{})
++			go func() {
++				<-entered
++				switch mode {
++				case "add":
++					create(3)
++				case "state":
++					other.SMLock.Lock()
++					other.SetState(smf_context.Active)
++					other.SMLock.Unlock()
++				case "remove":
++					smf_context.RemoveSMContext(other.Ref)
++				}
++				close(changed)
++			}()
++			once := sync.Once{}
++			engine := &SessionQerEngine{Scope: "city", StateDir: dir, Lookup: smf_context.GetSMContextByRef}
++			engine.Read = func(sm *smf_context.SMContext) (SessionQerView, error) {
++				once.Do(func() { close(entered); <-changed })
++				return SessionQerView{SessionQerIdentity: SessionQerIdentity{Scope: "city", SUPI: sm.Supi, SessionID: sm.PDUSessionID, Ref: sm.Ref, Epoch: sm.Ref, Key: canonicalSessionKey("city", sm.Supi, sm.PDUSessionID, sm.Ref)}, ObservedAt: intentNow()}, nil
++			}
++			out := httptest.NewRecorder()
++			c, _ := gin.CreateTestContext(out)
++			c.Request = httptest.NewRequest("GET", "/session-active-inventory", nil)
++			engine.HandleActiveInventory(c)
++			if out.Code != 409 {
++				t.Fatal("concurrent census incorrectly complete", out.Code, out.Body.String())
++			}
++		})
++	}
++}
++
++func TestNativeFullUPFCensusIncludesEmptyUPFAndRejectsOrphans(t *testing.T) {
++	old := smf_context.GetSelf().UserPlaneInformation
++	defer func() { smf_context.GetSelf().UserPlaneInformation = old }()
++	id := pfcpType.NodeID{NodeIdType: pfcpType.NodeIdTypeIpv4Address, IP: net.ParseIP("198.18.0.3").To4()}
++	node := &smf_context.UPNode{Name: "native", NodeID: id, UPF: smf_context.NewUPF(&id, nil)}
++	smf_context.GetSelf().UserPlaneInformation = &smf_context.UserPlaneInformation{UPFs: map[string]*smf_context.UPNode{"native": node}}
++	dump := map[string]interface{}{"schemaVersion": "cityverse.upf/v1", "source": "gtp5g-netlink", "available": true, "upf": "native", "epoch": "real-epoch", "observedAt": time.Now().UTC().Format(time.RFC3339Nano), "errors": []interface{}{}, "residuals": []interface{}{}, "sessions": []interface{}{}, "qers": []interface{}{}, "pdrs": []interface{}{}}
++	requests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++; json.NewEncoder(w).Encode(dump) }))
++	defer server.Close()
++	origins := map[string]string{"198.18.0.3": server.URL}
++	reader := requestNativeUPFReader()
++	if _, err := reader(server.URL); err != nil {
++		t.Fatal(err)
++	}
++	rows, err := verifyNativeFullUPFCensus(origins, reader, map[string]map[string]bool{})
++	if err != nil || len(rows) != 1 || rows[0]["upf_epoch"] != "real-epoch" || requests != 1 {
++		t.Fatal("zero-session native UPF not independently accounted", rows, err, requests)
++	}
++	dump["sessions"] = []interface{}{map[string]interface{}{"pfcpSeid": 101, "upf": "native", "evidence": "kernel-installed-pdr-far"}}
++	if _, err = verifyNativeFullUPFCensus(origins, requestNativeUPFReader(), map[string]map[string]bool{}); err == nil {
++		t.Fatal("other-SMF/orphan kernel session accepted")
++	}
++	dump["sessions"] = []interface{}{}
++	if _, err = verifyNativeFullUPFCensus(origins, requestNativeUPFReader(), map[string]map[string]bool{"198.18.0.3": {"101": true}}); err == nil {
++		t.Fatal("missing kernel session accepted")
++	}
++	dump["qers"] = []interface{}{map[string]interface{}{"pfcpSeid": 202}}
++	if _, err = verifyNativeFullUPFCensus(origins, requestNativeUPFReader(), map[string]map[string]bool{}); err == nil {
++		t.Fatal("orphan kernel QER accepted")
++	}
++	dump["qers"] = []interface{}{}
++	dump["pdrs"] = []interface{}{map[string]interface{}{"seid": 303}}
++	if _, err = verifyNativeFullUPFCensus(origins, requestNativeUPFReader(), map[string]map[string]bool{}); err == nil {
++		t.Fatal("orphan kernel PDR accepted")
++	}
++}
++
++// Missing records are ordinary absence; every store/lineage failure remains fail closed.
++func TestIntentAdmissionReadOnlyExactRecordAbsenceReturns404(t *testing.T) {
++	for _, damage := range []string{"absent", "root-missing", "selection-missing", "selection-permissions", "corrupt", "record-permissions", "boot-changed"} {
++		t.Run(damage, func(t *testing.T) {
++			root := t.TempDir()
++			if err := os.Chmod(root, 0700); err != nil {
++				t.Fatal(err)
++			}
++			dir := filepath.Join(root, "selection")
++			if err := os.Mkdir(dir, 0700); err != nil {
++				t.Fatal(err)
++			}
++			t.Setenv("SMF_SESSION_QER_STATE_DIR", root)
++			nonce := "fresh-native-test"
++			file := filepath.Join(dir, "admission-"+smf_context.IntentDigest(nonce)+".json")
++			want := http.StatusConflict
++			switch damage {
++			case "absent":
++				want = http.StatusNotFound
++			case "root-missing":
++				t.Setenv("SMF_SESSION_QER_STATE_DIR", filepath.Join(root, "missing"))
++			case "selection-missing":
++				if err := os.Remove(dir); err != nil {
++					t.Fatal(err)
++				}
++			case "selection-permissions":
++				if err := os.Chmod(dir, 0000); err != nil {
++					t.Fatal(err)
++				}
++				t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
++			case "corrupt":
++				if err := os.WriteFile(file, []byte("{"), 0600); err != nil {
++					t.Fatal(err)
++				}
++			case "record-permissions":
++				if err := os.WriteFile(file, []byte("{}"), 0000); err != nil {
++					t.Fatal(err)
++				}
++			case "boot-changed":
++				a := smf_context.IntentAdmission{Nonce: nonce, BootEpoch: "previous-smf-boot", Status: "registered"}
++				if err := smf_context.IntentSaveAdmissionLocked(a); err != nil {
++					t.Fatal(err)
++				}
++			}
++			before, _ := os.ReadDir(root)
++			out := httptest.NewRecorder()
++			c, _ := gin.CreateTestContext(out)
++			c.Params = gin.Params{{Key: "nonce", Value: nonce}}
++			(&Processor{}).HandleIntentAdmissionRead(c)
++			if out.Code != want {
++				t.Fatalf("%s: HTTP %d, want %d; %s", damage, out.Code, want, out.Body.String())
++			}
++			after, _ := os.ReadDir(root)
++			if len(before) != len(after) {
++				t.Fatal("read initialized a missing store")
++			}
++			if damage == "absent" {
++				if _, err := os.Lstat(file); !os.IsNotExist(err) {
++					t.Fatal("absence read created an admission")
++				}
++			}
++		})
++	}
++}

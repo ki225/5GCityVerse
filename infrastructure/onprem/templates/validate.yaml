@@ -1,0 +1,24 @@
+{{- if ne (len .Values.city.gnbs) 7 }}{{ fail "city requires exactly seven gNBs" }}{{ end -}}
+{{- $central := 0 -}}{{- $distributed := 0 -}}
+{{- range $site := .Values.city.sites -}}
+  {{- if eq $site.tier "central" }}{{ $central = add1 $central }}{{ end -}}
+  {{- if eq $site.tier "distributed" }}{{ $distributed = add1 $distributed }}{{ end -}}
+{{- end -}}
+{{- if or (ne (int $central) 1) (ne (int $distributed) 3) }}{{ fail "city requires one Central and three Distributed sites" }}{{ end -}}
+{{- if contains "REPLACE" (.Values.city.placement | toJson) }}{{ fail "fill the nodeSelector placeholder" }}{{ end -}}
+{{- $ids := dict -}}{{- $names := dict -}}{{- $n2 := dict -}}{{- $n3 := dict -}}
+{{- range $gnb := .Values.city.gnbs -}}
+  {{- if not (hasKey $.Values.city.slices $gnb.slice) }}{{ fail "gNB references an unknown slice" }}{{ end -}}
+  {{- $slice := index $.Values.city.slices $gnb.slice -}}
+  {{- $n2Address := toString $gnb.networkIndex -}}
+  {{- $n3Address := printf "%s.%d" $slice.n3Subnet (int $gnb.n3Host) -}}
+  {{- if or (hasKey $ids $gnb.id) (hasKey $names $gnb.workload) (hasKey $n2 $n2Address) (hasKey $n3 $n3Address) }}{{ fail "duplicate gNB identity or N2/N3 address" }}{{ end -}}
+  {{- $_ := set $ids $gnb.id true -}}{{- $_ := set $names $gnb.workload true -}}{{- $_ := set $n2 $n2Address true -}}{{- $_ := set $n3 $n3Address true -}}
+{{- end -}}
+{{- range $slice := .Values.city.slices -}}
+  {{- if not (hasKey $.Values.city.sites $slice.site) }}{{ fail "UPF references an unknown site" }}{{ end -}}
+  {{- if ne (int (default 1 $slice.replicas)) 1 }}{{ fail "fixed-address UPFs require one replica" }}{{ end -}}
+{{- end -}}
+{{- range $image := .Values.images -}}
+  {{- if not (regexMatch "^[^@]+@sha256:[0-9a-f]{64}$" $image) }}{{ fail "images must use immutable SHA-256 digests" }}{{ end -}}
+{{- end -}}

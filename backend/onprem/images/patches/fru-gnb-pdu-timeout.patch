@@ -1,0 +1,378 @@
+diff --git a/gnb/gnb.go b/gnb/gnb.go
+--- a/gnb/gnb.go
++++ b/gnb/gnb.go
+@@ -102,6 +102,29 @@
+ 	api
+ 
+ 	*logger.GnbLogger
++}
++
++var errPduCompletionTimeout = errors.New("PDU session establishment completion timed out")
++
++func waitPduCompletion(ranUe *RanUe) error {
++	// The UE's 45s startup deadline begins after its N1 connect returns.
++	// Budget PDU completion from that connection, not from the (possibly slow)
++	// registration that precedes the PDU request. This leaves time for the UE's
++	// failed-start deregistration to reach the RAN before the N1 read window ends.
++	timer := time.NewTimer(time.Until(ranUe.n1AcceptedAt.Add(40 * time.Second)))
++	defer timer.Stop()
++	select {
++	case <-ranUe.GetPduSessionEstablishmentCompleteChan():
++		if ranUe.pduWasCompleted() {
++			return nil
++		}
++		return errPduCompletionTimeout
++	case <-timer.C:
++		if ranUe.cancelPduSession() {
++			return errPduCompletionTimeout
++		}
++		return nil // A completed delivery won the race with the timer.
++	}
+ }
+ 
+ func NewGnb(config *model.GnbConfig, gnbLogger *logger.GnbLogger) *Gnb {
+@@ -619,6 +642,18 @@
+ 
+ 	if err := g.setupN1(ranUe); err != nil {
+ 		g.RanLog.Errorf("Error setting up N1: %v", err)
++		if errors.Is(err, errPduCompletionTimeout) {
++			// The UE startup deadline is 45s. Its failure path sends a valid
++			// deregistration request after that deadline; keep N1 available
++			// briefly to forward it, without retaining a UE forever.
++			if deadlineErr := ranUe.GetN1Conn().SetReadDeadline(time.Now().Add(20 * time.Second)); deadlineErr != nil {
++				g.RanLog.Errorf("Error setting failed-PDU UE read deadline: %v", deadlineErr)
++				return
++			}
++			if releaseErr := g.releaseN1(ranUe); releaseErr != nil {
++				g.RanLog.Errorf("Error releasing failed-PDU UE N1: %v", releaseErr)
++			}
++		}
+ 		return
+ 	}
+ 	g.GtpLog.Debugf("DL TEID: %s, UL TEID: %s", hex.EncodeToString(ranUe.GetDlTeid()), hex.EncodeToString(ranUe.GetUlTeid()))
+@@ -858,8 +893,10 @@
+ 
+ 	// wait dispatcher to receive ngap pdu session resource setup request from AMF
+ 
+-	<-ranUe.GetPduSessionEstablishmentCompleteChan()
+-	g.NgapLog.Infof("UE %s PDU session establishment completed", ranUe.GetMobileIdentityIMSI())
++	if err := waitPduCompletion(ranUe); err != nil {
++		return err
++	}
++	g.NgapLog.Infof("UE %s PDU NAS accept delivered; native session still requires core readback", ranUe.GetMobileIdentityIMSI())
+ 	return nil
+ }
+ 
+@@ -926,7 +963,11 @@
+ 
+ 	// wait dispatcher to receive ue deregistration accept from AMF
+ 
+-	<-ranUe.GetUeContextReleaseCompleteChan()
++	select {
++	case <-ranUe.GetUeContextReleaseCompleteChan():
++	case <-time.After(15 * time.Second):
++		return fmt.Errorf("UE deregistration completion timed out")
++	}
+ 	g.RanLog.Infoln("UE deregistration complete")
+ 	return nil
+ }
+diff --git a/gnb/ranUe.go b/gnb/ranUe.go
+--- a/gnb/ranUe.go
++++ b/gnb/ranUe.go
+@@ -4,6 +4,7 @@
+ 	"fmt"
+ 	"net"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/free-ran-ue/free-ran-ue/v2/constant"
+ 	"github.com/free5gc/aper"
+@@ -57,9 +58,13 @@
+ 	dlTeid aper.OctetString
+ 
+ 	n1Conn           net.Conn
++	n1AcceptedAt     time.Time
+ 	dataPlaneAddress *net.UDPAddr
+ 
+ 	pduSessionEstablishmentCompleteChan    chan struct{}
++	pduMtx                                 sync.Mutex
++	pduCanceled                            bool
++	pduCompleted                           bool
+ 	ueContextReleaseCompleteChan           chan struct{}
+ 	pduSessionModifyIndicationCompleteChan chan struct{}
+ 
+@@ -79,10 +84,11 @@
+ 
+ 		mobileIdentity5GS: nasType.MobileIdentity5GS{},
+ 
+-		n1Conn: n1Conn,
+-
+-		pduSessionEstablishmentCompleteChan:    make(chan struct{}),
+-		ueContextReleaseCompleteChan:           make(chan struct{}),
++		n1Conn:       n1Conn,
++		n1AcceptedAt: time.Now(),
++
++		pduSessionEstablishmentCompleteChan:    make(chan struct{}, 1),
++		ueContextReleaseCompleteChan:           make(chan struct{}, 1),
+ 		pduSessionModifyIndicationCompleteChan: make(chan struct{}),
+ 
+ 		nrdcIndicator:    false,
+@@ -93,8 +99,12 @@
+ func (r *RanUe) Release(ranUeNgapIdGenerator *RanUeNgapIdGenerator, teidGenerator *TeidGenerator) {
+ 	ranUeNgapIdGenerator.ReleaseRanUeId(r.ranUeNgapId)
+ 	teidGenerator.ReleaseTeid(r.dlTeid)
++	r.pduMtx.Lock()
++	r.pduCanceled = true
++	r.pduMtx.Unlock()
+ 	close(r.pduSessionEstablishmentCompleteChan)
+-	close(r.ueContextReleaseCompleteChan)
++	// A late AMF release can race the deregistration timeout. Its dispatcher
++	// must be able to signal without sending on a closed channel.
+ 	close(r.pduSessionModifyIndicationCompleteChan)
+ }
+ 
+@@ -169,8 +179,66 @@
+ 	return r.pduSessionEstablishmentCompleteChan
+ }
+ 
++// cancelPduSession closes the delivery window. A completion racing the timer
++// wins only if it was already committed before cancellation took the lock.
++func (r *RanUe) cancelPduSession() bool {
++	r.pduMtx.Lock()
++	defer r.pduMtx.Unlock()
++	if r.pduCompleted {
++		return false
++	}
++	r.pduCanceled = true
++	return true
++}
++
++func (r *RanUe) pduWasCompleted() bool {
++	r.pduMtx.Lock()
++	defer r.pduMtx.Unlock()
++	return r.pduCompleted
++}
++
++func (r *RanUe) writePduNas(packet []byte) (int, error) {
++	r.pduMtx.Lock()
++	defer r.pduMtx.Unlock()
++	if r.pduCanceled || r.pduCompleted {
++		return 0, fmt.Errorf("PDU establishment is no longer pending")
++	}
++	deadline := r.n1AcceptedAt.Add(40 * time.Second)
++	now := time.Now()
++	if !now.Before(deadline) {
++		r.pduCanceled = true
++		return 0, errPduCompletionTimeout
++	}
++	writeDeadline := now.Add(3 * time.Second)
++	if writeDeadline.After(deadline) {
++		writeDeadline = deadline
++	}
++	if err := r.n1Conn.SetWriteDeadline(writeDeadline); err != nil {
++		return 0, err
++	}
++	defer r.n1Conn.SetWriteDeadline(time.Time{})
++	n, err := r.n1Conn.Write(packet)
++	if err != nil {
++		return n, err
++	}
++	// The UE has received NAS Accept. Commit this under the same lock as the
++	// timeout cancellation so late delivery cannot masquerade as a timeout.
++	r.pduCompleted = true
++	r.pduSessionEstablishmentCompleteChan <- struct{}{}
++	return n, nil
++}
++
+ func (r *RanUe) GetUeContextReleaseCompleteChan() chan struct{} {
+ 	return r.ueContextReleaseCompleteChan
++}
++
++func (r *RanUe) signalUeContextReleaseComplete() {
++	// One completion is sufficient. A timed-out waiter or released UE must
++	// never block the NGAP dispatcher, including when a duplicate arrives.
++	select {
++	case r.ueContextReleaseCompleteChan <- struct{}{}:
++	default:
++	}
+ }
+ 
+ func (r *RanUe) GetPduSessionModifyIndicationCompleteChan() chan struct{} {
+diff --git a/gnb/ngapDispatcher.go b/gnb/ngapDispatcher.go
+--- a/gnb/ngapDispatcher.go
++++ b/gnb/ngapDispatcher.go
+@@ -250,7 +250,7 @@
+ 		}
+ 	}
+ 
+-	n, err := ranUe.GetN1Conn().Write(nasPdu)
++	n, err := ranUe.writePduNas(nasPdu)
+ 	if err != nil {
+ 		g.NgapLog.Errorf("Error send pdu session resource setup NASPDU to UE: %v", err)
+ 		return
+@@ -280,7 +280,7 @@
+ 	g.NgapLog.Tracef("Sent %d bytes of pdu session resource setup response to AMF", n)
+ 	g.NgapLog.Debugln("Send pdu session resource setup response to AMF")
+ 
+-	ranUe.GetPduSessionEstablishmentCompleteChan() <- struct{}{}
++	// The bounded waiter was signaled atomically with successful NAS delivery.
+ }
+ 
+ func (d *ngapDispatcher) ueContextReleaseProcessor(g *Gnb, ngapPdu *ngapType.NGAPPDU) {
+@@ -324,7 +324,7 @@
+ 	g.NgapLog.Tracef("Sent %d bytes of ngap ue context release complete message to AMF", n)
+ 	g.NgapLog.Debugln("Send ngap ue context release complete message to AMF")
+ 
+-	ranUe.GetUeContextReleaseCompleteChan() <- struct{}{}
++	ranUe.signalUeContextReleaseComplete()
+ }
+ 
+ func (d *ngapDispatcher) pduSessionResourceModifyIndicationProcessor(g *Gnb, ngapPdu *ngapType.NGAPPDU, ngapRaw []byte) {
+diff --git a/gnb/pdu_timeout_test.go b/gnb/pdu_timeout_test.go
+new file mode 100644
+--- /dev/null
++++ b/gnb/pdu_timeout_test.go
+@@ -0,0 +1,143 @@
++package gnb
++
++import (
++	"errors"
++	"net"
++	"testing"
++	"time"
++)
++
++func TestPduTimeoutCancelsLateDeliveryWithoutBlocking(t *testing.T) {
++	server, client := net.Pipe()
++	defer server.Close()
++	defer client.Close()
++	ranUe := NewRanUe(server, NewRanUeNgapIdGenerator())
++	ranUe.n1AcceptedAt = time.Now().Add(-40 * time.Second)
++	if err := waitPduCompletion(ranUe); !errors.Is(err, errPduCompletionTimeout) {
++		t.Fatalf("expected PDU timeout, got %v", err)
++	}
++	if _, err := ranUe.writePduNas([]byte{1}); err == nil {
++		t.Fatal("late PDU accept was sent after cancellation")
++	}
++	select {
++	case <-ranUe.GetPduSessionEstablishmentCompleteChan():
++		t.Fatal("late completion queued a signal")
++	default:
++	}
++}
++
++func TestPduCompletionWinsTimerRaceAndIsOneShot(t *testing.T) {
++	server, client := net.Pipe()
++	defer server.Close()
++	defer client.Close()
++	ranUe := NewRanUe(server, NewRanUeNgapIdGenerator())
++	read := make(chan struct{})
++	go func() { _, _ = client.Read(make([]byte, 1)); close(read) }()
++	if _, err := ranUe.writePduNas([]byte{1}); err != nil {
++		t.Fatalf("first NAS Accept was rejected: %v", err)
++	}
++	<-read
++	ranUe.n1AcceptedAt = time.Now().Add(-40 * time.Second)
++	if err := waitPduCompletion(ranUe); err != nil {
++		t.Fatalf("committed completion was lost: %v", err)
++	}
++	if ranUe.cancelPduSession() {
++		t.Fatal("completed PDU was later canceled")
++	}
++	if _, err := ranUe.writePduNas([]byte{1}); err == nil {
++		t.Fatal("duplicate NAS Accept was accepted")
++	}
++}
++
++func TestPduCompletionAndCancellationRaceHasOneOutcome(t *testing.T) {
++	for i := 0; i < 200; i++ {
++		server, client := net.Pipe()
++		ranUe := NewRanUe(server, NewRanUeNgapIdGenerator())
++		ranUe.n1AcceptedAt = time.Now().Add(-40*time.Second + 10*time.Millisecond)
++		go func() { _, _ = client.Read(make([]byte, 1)) }()
++		complete := make(chan error, 1)
++		go func() {
++			_, err := ranUe.writePduNas([]byte{1})
++			complete <- err
++		}()
++		err := waitPduCompletion(ranUe)
++		accepted := <-complete == nil
++		server.Close()
++		client.Close()
++		if errors.Is(err, errPduCompletionTimeout) == accepted {
++			t.Fatalf("iteration %d: timeout=%v, completion accepted=%v", i, err, accepted)
++		}
++	}
++}
++
++func TestSlowRegistrationUsesConnectionDeadline(t *testing.T) {
++	server, client := net.Pipe()
++	defer server.Close()
++	defer client.Close()
++	ranUe := NewRanUe(server, NewRanUeNgapIdGenerator())
++	// Simulate a registration that consumed more than the entire PDU budget.
++	// A timeout measured from the PDU request would wait another 40 seconds.
++	ranUe.n1AcceptedAt = time.Now().Add(-44 * time.Second)
++	if _, err := ranUe.writePduNas([]byte{1}); !errors.Is(err, errPduCompletionTimeout) {
++		t.Fatalf("late NGAP completion bypassed the absolute deadline: %v", err)
++	}
++	started := time.Now()
++	if err := waitPduCompletion(ranUe); !errors.Is(err, errPduCompletionTimeout) {
++		t.Fatalf("slow registration must exhaust the shared deadline: %v", err)
++	}
++	if elapsed := time.Since(started); elapsed > time.Second {
++		t.Fatalf("PDU wait restarted after slow registration: %v", elapsed)
++	}
++	if _, err := ranUe.writePduNas([]byte{1}); err == nil {
++		t.Fatal("late completion wrote NAS after the shared deadline")
++	}
++}
++
++func TestClosedN1CannotCommitPduCompletion(t *testing.T) {
++	server, client := net.Pipe()
++	ranUe := NewRanUe(server, NewRanUeNgapIdGenerator())
++	client.Close()
++	if _, err := ranUe.writePduNas([]byte{1}); err == nil {
++		t.Fatal("closed N1 connection accepted PDU NAS")
++	}
++	ranUe.n1AcceptedAt = time.Now().Add(-40 * time.Second)
++	if err := waitPduCompletion(ranUe); !errors.Is(err, errPduCompletionTimeout) {
++		t.Fatalf("closed connection committed PDU completion: %v", err)
++	}
++	server.Close()
++}
++
++func TestLateAmfReleaseSignalRacesRanUeReleaseWithoutBlocking(t *testing.T) {
++	for i := 0; i < 200; i++ {
++		ids := NewRanUeNgapIdGenerator()
++		ranUe := NewRanUe(nil, ids)
++		teids := NewTeidGenerator()
++		start := make(chan struct{})
++		done := make(chan struct{}, 2)
++		go func() {
++			<-start
++			ranUe.signalUeContextReleaseComplete()
++			done <- struct{}{}
++		}()
++		go func() {
++			<-start
++			ranUe.Release(ids, teids)
++			done <- struct{}{}
++		}()
++		close(start)
++		for j := 0; j < 2; j++ {
++			select {
++			case <-done:
++			case <-time.After(time.Second):
++				t.Fatalf("iteration %d: late AMF signal or UE release blocked", i)
++			}
++		}
++		// A duplicate arriving after Release must also be safe and nonblocking.
++		ranUe.signalUeContextReleaseComplete()
++		select {
++		case <-ranUe.GetUeContextReleaseCompleteChan():
++		default:
++			t.Fatalf("iteration %d: completion signal was lost", i)
++		}
++	}
++}

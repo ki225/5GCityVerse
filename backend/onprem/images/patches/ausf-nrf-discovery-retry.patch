@@ -1,0 +1,18 @@
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -95 +95,13 @@
+-	res, err := client.NFInstancesStoreApi.SearchNFInstances(ctx, &param)
++	var res *Nnrf_NFDiscovery.SearchNFInstancesResponse
++	for attempt := 0; attempt < 3; attempt++ {
++		res, err = client.NFInstancesStoreApi.SearchNFInstances(ctx, &param)
++		if err == nil || !strings.Contains(err.Error(), "http2: client conn could not be established") || attempt == 2 {
++			break
++		}
++		logger.ConsumerLog.Warnf("Transient NRF discovery transport failure; retry %d/2", attempt+1)
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-time.After(time.Duration(50*(attempt+1)) * time.Millisecond):
++		}
++	}

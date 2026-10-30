@@ -1,0 +1,36 @@
+--- a/internal/sbi/api_oam.go
++++ b/internal/sbi/api_oam.go
+@@ -3,7 +3,6 @@
+ import (
+ 	"net/http"
+ 
+-	"github.com/gin-contrib/cors"
+ 	"github.com/gin-gonic/gin"
+ 
+ 	"github.com/free5gc/openapi/models"
+@@ -11,25 +10,9 @@
+ 	"github.com/free5gc/util/metrics/sbi"
+ )
+ 
+-const (
+-	CorsConfigMaxAge = 86400
+-)
+-
+ func (s *Server) setCorsHeader(c *gin.Context) {
+ 	// TODO: 1. turn these values into configurable variables
+ 	// TODO: 2. use the official cors middleware
+-	s.router.Use(cors.New(cors.Config{
+-		AllowMethods: []string{"GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"},
+-		AllowHeaders: []string{
+-			"Origin", "Content-Length", "Content-Type", "User-Agent",
+-			"Referrer", "Host", "Token", "X-Requested-With",
+-		},
+-		ExposeHeaders:    []string{"Content-Length"},
+-		AllowCredentials: true,
+-		AllowAllOrigins:  true,
+-		MaxAge:           CorsConfigMaxAge,
+-	}))
+-
+ 	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+ 	c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+ 	c.Writer.Header().Set(

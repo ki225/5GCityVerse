@@ -1,0 +1,23 @@
+{
+  "sourceRepository": "https://github.com/free5gc/pcf.git",
+  "sourceCommit": "df6c0daacbc7fe5f610f19665e169f013eb05721",
+  "patchSha256": "44c19208fbf8d1f491f31071983aa48d82f202605293ee14744b50860d7f0e37",
+  "sourceCheckoutLineEndings": "crlf",
+  "patchedFileLineEndings": "lf",
+  "patchedPaths": [
+    "Dockerfile.boot-receipt",
+    "Dockerfile.boot-receipt.dockerignore",
+    "internal/context/boot_receipt.go",
+    "internal/context/boot_receipt_test.go",
+    "internal/sbi/api_oam.go",
+    "internal/sbi/pcf_oam_cors_regression_test.go",
+    "pkg/service/init.go"
+  ],
+  "builderImage": "golang:1.25.5@sha256:22bd1c41c958c762e9633f07a5fee8266300e5f25e18e269a6d87a4b870368aa",
+  "runtimeImage": "free5gc/pcf:v4.2.2@sha256:b6208c82a02917cb6d620336d1245c00d875254e2c9bd28416c2e250a43453a4",
+  "expectedBinarySha256": "874355c1adf13680d2ca2c16fcc0ecdf6e5ef2cec918063a67b1ecdfe108063b",
+  "referenceV3OciManifestSha256": "70b92564f78ec7dab5ce2f2def05ea9b13c5356ff7cf04dd0247acfb62598447",
+  "referenceV3OciConfigSha256": "bbb2121f2cf726389072b2550b5647acb6f5e0ad0f1371adfdd95b14e50112f4",
+  "referenceV3OciArchiveSha256": "f55ae9af96448b7f08a2261e41f619eb51716f13a54cdc909bb1c64a0df0c9fe",
+  "scope": "new PCF process pre-listener empty pools only; prior epoch unknown"
+}
